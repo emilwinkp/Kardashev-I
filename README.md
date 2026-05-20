@@ -1,1 +1,4 @@
 # Kardashev-I
+
+Autores:
+Emil 
