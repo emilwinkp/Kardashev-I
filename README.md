@@ -1,1 +1,2 @@
 # Kardashev-I
+# Autores: Riojo 
