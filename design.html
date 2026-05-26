@@ -1,0 +1,1024 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Kardashev-I — Simulador Solar Fotovoltaico</title>
+<meta name="viewport" content="width=1440" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  :root{
+    --bg:#000;
+    --bg-1:#070707;
+    --bg-2:#0c0c0c;
+    --card:#0a0a0a;
+    --border:#1a1a1a;
+    --border-strong:#262626;
+    --fg:#ededed;
+    --fg-2:#a1a1a1;
+    --fg-3:#666;
+    --fg-4:#3f3f3f;
+    --accent:#fbbf24;        /* solar amber */
+    --accent-2:#f97316;      /* orange */
+    --accent-soft:rgba(251,191,36,.12);
+    --accent-line:rgba(251,191,36,.35);
+    --danger:#f43f5e;
+    --success:#22c55e;
+    --info:#60a5fa;
+    --radius:10px;
+    --mono:'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:'Inter',system-ui,sans-serif;font-feature-settings:"cv11","ss01";-webkit-font-smoothing:antialiased;}
+  body{min-height:100vh;overflow-x:hidden}
+  ::selection{background:var(--accent);color:#000}
+  a{color:inherit;text-decoration:none}
+
+  /* ============== LANDING ============== */
+  #landing{
+    position:fixed;inset:0;background:var(--bg);z-index:50;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    transition:opacity .9s ease, visibility .9s ease;
+  }
+  #landing.hidden{opacity:0;visibility:hidden;pointer-events:none}
+  #landing::before{
+    content:"";position:absolute;inset:0;
+    background:
+      radial-gradient(circle at 50% 60%, rgba(251,191,36,.10), transparent 45%),
+      radial-gradient(circle at 50% 100%, rgba(249,115,22,.07), transparent 55%);
+    pointer-events:none;
+  }
+  #landing::after{
+    content:"";position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+    background-size:60px 60px;
+    mask-image:radial-gradient(circle at 50% 50%, #000 0%, transparent 70%);
+    pointer-events:none;
+  }
+  .land-inner{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:36px;text-align:center}
+  .land-eyebrow{
+    display:inline-flex;align-items:center;gap:10px;
+    padding:6px 12px;border:1px solid var(--border-strong);border-radius:999px;
+    background:rgba(255,255,255,.02);
+    font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--fg-2);
+  }
+  .land-eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}
+  .land-title{
+    font-size:140px;line-height:.95;letter-spacing:-.06em;font-weight:600;
+    background:linear-gradient(180deg,#fff 0%, #888 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    margin:0;
+  }
+  .land-title .dash{color:var(--accent);-webkit-text-fill-color:var(--accent)}
+  .land-sub{font-size:18px;color:var(--fg-2);max-width:520px;line-height:1.5;font-weight:300}
+  .land-cta{
+    display:inline-flex;align-items:center;gap:10px;
+    background:#fff;color:#000;padding:14px 22px;border-radius:999px;
+    font-weight:500;font-size:15px;letter-spacing:-.01em;border:none;cursor:pointer;
+    transition:transform .2s ease, background .2s ease;
+  }
+  .land-cta:hover{transform:translateY(-1px);background:#f1f1f1}
+  .land-cta svg{transition:transform .2s ease}
+  .land-cta:hover svg{transform:translateX(3px)}
+
+  .land-meta{
+    position:absolute;left:0;right:0;bottom:32px;
+    display:flex;justify-content:space-between;align-items:center;
+    padding:0 40px;font-family:var(--mono);font-size:11px;color:var(--fg-3);
+    letter-spacing:.08em;
+  }
+
+  /* ============== APP ============== */
+  #app{opacity:0;transition:opacity .8s ease .2s}
+  #app.visible{opacity:1}
+
+  .topbar{
+    position:sticky;top:0;z-index:30;
+    height:56px;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 24px;
+    border-bottom:1px solid var(--border);
+    background:rgba(0,0,0,.7);
+    backdrop-filter:blur(12px);
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-weight:500;letter-spacing:-.01em}
+  .brand-mark{
+    width:22px;height:22px;border-radius:6px;
+    background:conic-gradient(from 200deg, var(--accent), var(--accent-2), var(--accent));
+    box-shadow:0 0 12px rgba(251,191,36,.25);
+    position:relative;
+  }
+  .brand-mark::after{content:"";position:absolute;inset:5px;background:#000;border-radius:3px}
+  .brand-name{font-size:14px}
+  .brand-name span{color:var(--fg-3);font-weight:400;margin:0 8px}
+  .topbar-right{display:flex;align-items:center;gap:18px;font-size:12.5px;color:var(--fg-2)}
+  .topbar-right .pill{
+    display:inline-flex;align-items:center;gap:8px;padding:5px 11px;border-radius:999px;
+    border:1px solid var(--border-strong);background:rgba(255,255,255,.02);
+    font-family:var(--mono);font-size:11px;color:var(--fg-2);
+  }
+  .topbar-right .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--success);box-shadow:0 0 8px var(--success)}
+  .topbar-link{color:var(--fg-2);font-size:13px}
+  .topbar-link:hover{color:var(--fg)}
+
+  .shell{
+    display:grid;
+    grid-template-columns:380px 1fr;
+    gap:0;
+    min-height:calc(100vh - 56px);
+  }
+
+  /* ============== SIDEBAR (INPUTS) ============== */
+  .sidebar{
+    border-right:1px solid var(--border);
+    padding:28px 24px 40px;
+    background:linear-gradient(180deg, rgba(255,255,255,.012), transparent 200px);
+  }
+  .sb-head{margin-bottom:24px}
+  .sb-kicker{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--fg-3);margin-bottom:8px}
+  .sb-title{font-size:18px;font-weight:500;letter-spacing:-.01em;margin:0 0 6px}
+  .sb-desc{font-size:12.5px;color:var(--fg-2);line-height:1.55;margin:0}
+
+  .section{margin-bottom:26px}
+  .section-head{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:12px;
+  }
+  .section-head h3{
+    font-size:11px;font-family:var(--mono);font-weight:500;
+    letter-spacing:.18em;text-transform:uppercase;color:var(--fg-2);margin:0;
+  }
+  .section-head .num{font-family:var(--mono);font-size:10.5px;color:var(--fg-4)}
+
+  .field{margin-bottom:12px}
+  .field-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+  .field label{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--fg-2);margin-bottom:6px}
+  .field label .hint{font-family:var(--mono);font-size:10.5px;color:var(--fg-4)}
+
+  .input, .select{
+    width:100%;
+    background:var(--bg-1);
+    border:1px solid var(--border-strong);
+    color:var(--fg);
+    padding:9px 11px;
+    border-radius:8px;
+    font-size:13px;
+    font-family:var(--mono);
+    transition:border-color .15s ease, background .15s ease;
+    outline:none;
+  }
+  .input:hover, .select:hover{border-color:#333}
+  .input:focus, .select:focus{border-color:var(--accent);background:#0a0a0a;box-shadow:0 0 0 3px rgba(251,191,36,.10)}
+  .input-unit{position:relative}
+  .input-unit .input{padding-right:42px}
+  .input-unit .unit{
+    position:absolute;right:11px;top:50%;transform:translateY(-50%);
+    font-family:var(--mono);font-size:11px;color:var(--fg-3);pointer-events:none
+  }
+
+  /* slider */
+  .slider-wrap{display:flex;flex-direction:column;gap:8px}
+  .slider-top{display:flex;justify-content:space-between;align-items:baseline}
+  .slider-value{font-family:var(--mono);font-size:18px;font-weight:500;color:var(--fg);letter-spacing:-.01em}
+  .slider-value .u{color:var(--fg-3);font-size:12px;margin-left:3px}
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;
+    width:100%;height:4px;background:#1f1f1f;border-radius:3px;outline:none;
+    background-image:linear-gradient(var(--accent),var(--accent));
+    background-size:0% 100%;background-repeat:no-repeat;
+    transition:background-size .05s linear;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:2px solid #000;box-shadow:0 0 0 1px var(--accent), 0 2px 6px rgba(251,191,36,.4);
+    cursor:pointer;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:2px solid #000;box-shadow:0 0 0 1px var(--accent), 0 2px 6px rgba(251,191,36,.4);
+    cursor:pointer;
+  }
+  .ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--fg-4)}
+
+  /* compass */
+  .compass-wrap{display:flex;gap:14px;align-items:center;margin-top:4px}
+  .compass{
+    width:80px;height:80px;flex-shrink:0;border-radius:50%;
+    background:radial-gradient(circle, #0a0a0a 55%, #050505 100%);
+    border:1px solid var(--border-strong);
+    position:relative;
+  }
+  .compass .ring{position:absolute;inset:8px;border-radius:50%;border:1px dashed #1f1f1f}
+  .compass .needle{
+    position:absolute;left:50%;top:50%;width:2px;height:32px;
+    background:linear-gradient(180deg, var(--accent), transparent);
+    transform-origin:50% 100%;
+    transform:translate(-50%,-100%) rotate(0deg);
+    transition:transform .15s ease;
+  }
+  .compass .needle::after{
+    content:"";position:absolute;top:-4px;left:50%;transform:translateX(-50%);
+    width:8px;height:8px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 10px var(--accent);
+  }
+  .compass .center{position:absolute;left:50%;top:50%;width:5px;height:5px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+  .compass .lbl{position:absolute;font-family:var(--mono);font-size:9px;color:var(--fg-3)}
+  .compass .lbl.n{top:4px;left:50%;transform:translateX(-50%)}
+  .compass .lbl.s{bottom:4px;left:50%;transform:translateX(-50%)}
+  .compass .lbl.e{right:4px;top:50%;transform:translateY(-50%)}
+  .compass .lbl.w{left:4px;top:50%;transform:translateY(-50%)}
+  .compass-info{flex:1;display:flex;flex-direction:column;gap:6px}
+  .compass-info .val{font-family:var(--mono);font-size:18px;font-weight:500}
+  .compass-info .dir{font-size:11px;color:var(--fg-2);font-family:var(--mono);letter-spacing:.05em}
+
+  /* map */
+  #map{
+    height:170px;border-radius:8px;border:1px solid var(--border-strong);
+    background:#0a0a0a;overflow:hidden;
+    filter:hue-rotate(0deg);
+  }
+  .leaflet-container{background:#0a0a0a !important;font-family:'Inter',sans-serif !important}
+  .leaflet-tile{filter:invert(1) hue-rotate(180deg) saturate(.45) brightness(.85) contrast(1.1)}
+  .leaflet-control-attribution{display:none}
+  .leaflet-control-zoom a{
+    background:#111 !important;color:#ccc !important;border:1px solid var(--border-strong) !important;
+  }
+  .leaflet-control-zoom a:hover{background:#1a1a1a !important}
+
+  /* calc button */
+  .calc-btn{
+    width:100%;
+    margin-top:8px;
+    background:var(--fg);color:#000;
+    padding:12px 16px;border:none;border-radius:8px;
+    font-weight:500;font-size:13.5px;letter-spacing:-.01em;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:8px;
+    transition:transform .15s ease, background .15s ease;
+  }
+  .calc-btn:hover{background:#fff;transform:translateY(-1px)}
+  .calc-btn:active{transform:translateY(0)}
+  .calc-btn .kbd{
+    margin-left:auto;font-family:var(--mono);font-size:10.5px;
+    border:1px solid #d4d4d4;color:#555;padding:1px 6px;border-radius:4px;background:#eee;
+  }
+
+  /* ============== MAIN ============== */
+  .main{padding:28px 32px 60px;min-width:0;max-width:none}
+
+  .alert{
+    display:flex;align-items:flex-start;gap:12px;
+    background:rgba(244,63,94,.06);
+    border:1px solid rgba(244,63,94,.3);
+    border-radius:8px;padding:12px 14px;margin-bottom:20px;
+  }
+  .alert.hidden{display:none}
+  .alert .icn{width:18px;height:18px;color:var(--danger);flex-shrink:0;margin-top:1px}
+  .alert .body{font-size:13px;color:#fecdd3}
+  .alert .body strong{color:#fff;display:block;margin-bottom:2px;font-weight:500}
+
+  .page-head{
+    display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;
+  }
+  .page-head h1{font-size:24px;font-weight:500;letter-spacing:-.025em;margin:0 0 4px}
+  .page-head .sub{font-size:13px;color:var(--fg-2);margin:0}
+  .page-head .meta{font-family:var(--mono);font-size:11px;color:var(--fg-3);text-align:right;line-height:1.55}
+  .page-head .meta b{color:var(--fg);font-weight:500}
+
+  /* KPI grid */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+  .kpi{
+    background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 18px 16px;position:relative;overflow:hidden;
+  }
+  .kpi::before{
+    content:"";position:absolute;top:0;left:0;right:0;height:1px;
+    background:linear-gradient(90deg, transparent, var(--accent-line), transparent);
+    opacity:.5;
+  }
+  .kpi-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .kpi-label{font-size:11.5px;color:var(--fg-2);font-weight:500;letter-spacing:.01em}
+  .kpi-icn{
+    width:28px;height:28px;border-radius:7px;
+    background:rgba(255,255,255,.025);border:1px solid var(--border-strong);
+    display:flex;align-items:center;justify-content:center;color:var(--fg-2);
+  }
+  .kpi-icn svg{width:14px;height:14px}
+  .kpi-value{font-size:30px;font-weight:500;letter-spacing:-.03em;margin-bottom:6px;line-height:1.05}
+  .kpi-value .u{font-family:var(--mono);font-size:13px;color:var(--fg-3);font-weight:400;margin-left:4px;letter-spacing:0}
+  .kpi-foot{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--fg-3)}
+  .kpi-delta{display:inline-flex;align-items:center;gap:3px;font-family:var(--mono);font-size:11px}
+  .kpi-delta.up{color:var(--success)}
+  .kpi-delta.down{color:var(--danger)}
+
+  /* Charts */
+  .grid-12{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px 20px 20px;
+  }
+  .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px;flex-wrap:wrap}
+  .card-title{font-size:14px;font-weight:500;letter-spacing:-.01em;margin:0}
+  .card-sub{font-size:12px;color:var(--fg-3);margin:0;margin-top:2px}
+  .card-titlewrap{display:flex;flex-direction:column}
+  .card-actions{display:flex;align-items:center;gap:6px}
+
+  .seg{
+    display:inline-flex;border:1px solid var(--border-strong);border-radius:7px;overflow:hidden;background:var(--bg-1);
+  }
+  .seg button{
+    background:transparent;border:none;color:var(--fg-2);
+    padding:6px 10px;font-size:11.5px;font-family:var(--mono);cursor:pointer;
+    border-right:1px solid var(--border-strong);transition:background .15s ease, color .15s ease;
+  }
+  .seg button:last-child{border-right:none}
+  .seg button:hover{color:var(--fg)}
+  .seg button.active{background:var(--fg);color:#000}
+
+  .legend{display:flex;align-items:center;gap:14px;font-size:11.5px;color:var(--fg-2)}
+  .legend .swatch{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+  .chart-wrap{position:relative;height:260px}
+  .chart-wrap.tall{height:300px}
+
+  .range-row{
+    display:flex;align-items:center;gap:8px;
+    background:var(--bg-1);border:1px solid var(--border-strong);border-radius:7px;padding:4px 6px 4px 10px;
+  }
+  .range-row .lbl{font-family:var(--mono);font-size:10.5px;color:var(--fg-3);letter-spacing:.05em;text-transform:uppercase}
+  .range-row input{
+    background:transparent;border:none;color:var(--fg);font-family:var(--mono);font-size:11.5px;
+    padding:4px 6px;outline:none;width:115px;
+    color-scheme:dark;
+  }
+  .range-row .dash{color:var(--fg-4);font-family:var(--mono)}
+
+  .col-7{grid-column:span 7}
+  .col-5{grid-column:span 5}
+  .col-12{grid-column:span 12}
+
+  /* utility */
+  .row-gap-14{margin-top:14px}
+
+  /* Stats strip inside chart cards */
+  .ministats{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:0;
+    margin-top:14px;border-top:1px solid var(--border);padding-top:12px;
+  }
+  .ministats > div{padding:0 14px;border-right:1px solid var(--border)}
+  .ministats > div:first-child{padding-left:0}
+  .ministats > div:last-child{border-right:none;padding-right:0}
+  .ms-lbl{font-size:10.5px;font-family:var(--mono);color:var(--fg-3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px}
+  .ms-val{font-size:15px;font-weight:500;letter-spacing:-.01em}
+  .ms-val .u{font-family:var(--mono);font-size:11px;color:var(--fg-3);font-weight:400;margin-left:3px}
+
+  /* footer */
+  footer{
+    padding:24px 32px;border-top:1px solid var(--border);
+    display:flex;justify-content:space-between;align-items:center;
+    font-family:var(--mono);font-size:10.5px;color:var(--fg-3);
+    margin-top:40px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ============== LANDING ============== -->
+<div id="landing">
+  <div class="land-inner">
+    <div class="land-eyebrow"><span class="dot"></span>v0.1 · Simulación fotovoltaica</div>
+    <h1 class="land-title">Kardashev<span class="dash">—</span>I</h1>
+    <p class="land-sub">Un simulador de generación solar fotovoltaica de precisión. Modela tu instalación con datos geoespaciales reales, geometría solar e irradiancia POA.</p>
+    <button class="land-cta" id="enter-app">
+      Entrar al simulador
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+    </button>
+  </div>
+  <div class="land-meta">
+    <span>EST. 2026 · OBSERVATORIO ENERGÉTICO</span>
+    <span>LAT 0.0000 · LON 0.0000 · UTC±00:00</span>
+  </div>
+</div>
+
+<!-- ============== APP ============== -->
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div class="brand-name">Kardashev-I <span>/</span> Simulador FV</div>
+    </div>
+    <div class="topbar-right">
+      <a class="topbar-link" href="#">Documentación</a>
+      <a class="topbar-link" href="#">Modelo</a>
+      <a class="topbar-link" href="#">API</a>
+      <div class="pill"><span class="dot"></span>JENSEN · ACTIVO</div>
+    </div>
+  </header>
+
+  <div class="shell">
+
+    <!-- ============== SIDEBAR ============== -->
+    <aside class="sidebar">
+      <div class="sb-head">
+        <div class="sb-kicker">Configuración</div>
+        <h2 class="sb-title">Parámetros del sistema</h2>
+        <p class="sb-desc">Define la ubicación geográfica, la geometría del arreglo y las pérdidas. Los resultados se calcularán con el modelo de Jensen.</p>
+      </div>
+
+      <!-- 1. Ubicación -->
+      <div class="section">
+        <div class="section-head">
+          <h3>Ubicación</h3>
+          <span class="num">01</span>
+        </div>
+
+        <div id="map"></div>
+
+        <div class="field-row" style="margin-top:12px">
+          <div class="field">
+            <label>Latitud <span class="hint">°N</span></label>
+            <input class="input" id="inp-lat" type="text" value="19.4326" />
+          </div>
+          <div class="field">
+            <label>Longitud <span class="hint">°E</span></label>
+            <input class="input" id="inp-lon" type="text" value="-99.1332" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Zona horaria <span class="hint">IANA</span></label>
+          <input class="input" id="inp-tz" type="text" value="America/Mexico_City" />
+        </div>
+      </div>
+
+      <!-- 2. Orientación -->
+      <div class="section">
+        <div class="section-head">
+          <h3>Orientación</h3>
+          <span class="num">02</span>
+        </div>
+
+        <div class="field">
+          <div class="slider-wrap">
+            <div class="slider-top">
+              <label style="margin:0">Inclinación (tilt)</label>
+              <div class="slider-value"><span id="val-tilt">22</span><span class="u">°</span></div>
+            </div>
+            <input id="sld-tilt" type="range" min="0" max="90" step="1" value="22" />
+            <div class="ticks"><span>0°</span><span>30°</span><span>60°</span><span>90°</span></div>
+          </div>
+        </div>
+
+        <div class="field" style="margin-top:18px">
+          <label style="margin-bottom:8px">Azimut</label>
+          <div class="compass-wrap">
+            <div class="compass" id="compass">
+              <div class="ring"></div>
+              <div class="lbl n">N</div><div class="lbl e">E</div><div class="lbl s">S</div><div class="lbl w">O</div>
+              <div class="needle" id="needle"></div>
+              <div class="center"></div>
+            </div>
+            <div class="compass-info">
+              <div class="val"><span id="val-az">180</span>°</div>
+              <div class="dir" id="val-azdir">SUR · óptimo en hemisferio N</div>
+              <input id="sld-azimuth" type="range" min="0" max="360" step="1" value="180" style="margin-top:2px" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Sistema -->
+      <div class="section">
+        <div class="section-head">
+          <h3>Sistema</h3>
+          <span class="num">03</span>
+        </div>
+
+        <div class="field">
+          <label>Área del panel <span class="hint">superficie</span></label>
+          <div class="input-unit">
+            <input class="input" id="inp-area" type="number" step="0.1" value="42.0" />
+            <span class="unit">m²</span>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label>Eficiencia η <span class="hint">0–1</span></label>
+            <input class="input" id="inp-eff" type="number" step="0.01" min="0" max="1" value="0.21" />
+          </div>
+          <div class="field">
+            <label>Performance ratio <span class="hint">0–1</span></label>
+            <input class="input" id="inp-pr" type="number" step="0.01" min="0" max="1" value="0.82" />
+          </div>
+        </div>
+      </div>
+
+      <button class="calc-btn" id="btn-calc">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+        Calcular generación
+        <span class="kbd">⌘ ⏎</span>
+      </button>
+    </aside>
+
+    <!-- ============== MAIN ============== -->
+    <main class="main">
+
+      <div class="alert hidden" id="error-alert">
+        <svg class="icn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        <div class="body">
+          <strong>Error de validación</strong>
+          Verifica que la latitud esté entre -90 y 90, la longitud entre -180 y 180, y los coeficientes η y PR entre 0 y 1.
+        </div>
+      </div>
+
+      <div class="page-head">
+        <div>
+          <h1>Resumen anual</h1>
+          <p class="sub">Producción estimada para una instalación de 42 m² · η 0.21 · PR 0.82</p>
+        </div>
+        <div class="meta">
+          ÚLTIMO CÁLCULO · <b>HOY 14:22</b><br>
+          MODELO JENSEN · TMY3 2010-2020
+        </div>
+      </div>
+
+      <!-- KPIs -->
+      <div class="kpis">
+        <div class="kpi">
+          <div class="kpi-head">
+            <div class="kpi-label">Energía anual</div>
+            <div class="kpi-icn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
+          </div>
+          <div class="kpi-value">14,832<span class="u">kWh</span></div>
+          <div class="kpi-foot">
+            <span class="kpi-delta up">▲ 4.2%</span>
+            <span>vs. promedio histórico</span>
+          </div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head">
+            <div class="kpi-label">Potencia pico</div>
+            <div class="kpi-icn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg></div>
+          </div>
+          <div class="kpi-value">8.82<span class="u">kWp</span></div>
+          <div class="kpi-foot">
+            <span class="kpi-delta">42 m² · η 0.21</span>
+          </div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head">
+            <div class="kpi-label">Factor de capacidad</div>
+            <div class="kpi-icn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+          </div>
+          <div class="kpi-value">19.2<span class="u">%</span></div>
+          <div class="kpi-foot">
+            <span class="kpi-delta up">▲ 0.6 pp</span>
+            <span>sobre referencia</span>
+          </div>
+        </div>
+
+        <div class="kpi">
+          <div class="kpi-head">
+            <div class="kpi-label">Mes pico</div>
+            <div class="kpi-icn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></svg></div>
+          </div>
+          <div class="kpi-value">Mayo</div>
+          <div class="kpi-foot">
+            <span class="kpi-delta">1,612 kWh · 33.4 °C avg</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Charts row 1 -->
+      <div class="grid-12">
+
+        <!-- Daily generation -->
+        <div class="card col-12">
+          <div class="card-head">
+            <div class="card-titlewrap">
+              <h3 class="card-title">Generación diaria · año completo</h3>
+              <p class="card-sub">kWh/día estimados a partir de POA · TMY3 + Jensen</p>
+            </div>
+            <div class="card-actions">
+              <div class="legend">
+                <span><span class="swatch" style="background:#fbbf24"></span>Generación</span>
+                <span><span class="swatch" style="background:#3f3f3f"></span>Mediana móvil</span>
+              </div>
+              <div class="seg" id="seg-daily">
+                <button data-range="1M">1M</button>
+                <button data-range="3M">3M</button>
+                <button data-range="6M">6M</button>
+                <button data-range="YTD">YTD</button>
+                <button class="active" data-range="1Y">1A</button>
+              </div>
+            </div>
+          </div>
+          <div class="chart-wrap tall"><canvas id="chart-daily"></canvas></div>
+
+          <div class="ministats">
+            <div>
+              <div class="ms-lbl">Día pico</div>
+              <div class="ms-val">61.4<span class="u">kWh · 18 may</span></div>
+            </div>
+            <div>
+              <div class="ms-lbl">Día mínimo</div>
+              <div class="ms-val">12.1<span class="u">kWh · 22 dic</span></div>
+            </div>
+            <div>
+              <div class="ms-lbl">Promedio diario</div>
+              <div class="ms-val">40.6<span class="u">kWh/día</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Monthly bars -->
+        <div class="card col-5 row-gap-14">
+          <div class="card-head">
+            <div class="card-titlewrap">
+              <h3 class="card-title">Producción mensual</h3>
+              <p class="card-sub">Acumulado por mes · 12 meses</p>
+            </div>
+            <div class="legend">
+              <span><span class="swatch" style="background:#fbbf24"></span>kWh</span>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
+        </div>
+
+        <!-- GHI vs POA -->
+        <div class="card col-7 row-gap-14">
+          <div class="card-head">
+            <div class="card-titlewrap">
+              <h3 class="card-title">Irradiancia · GHI vs POA</h3>
+              <p class="card-sub">W/m² promedio horario sobre el rango seleccionado</p>
+            </div>
+            <div class="card-actions">
+              <div class="legend">
+                <span><span class="swatch" style="background:#60a5fa"></span>GHI</span>
+                <span><span class="swatch" style="background:#fbbf24"></span>POA</span>
+              </div>
+              <div class="range-row">
+                <span class="lbl">RANGO</span>
+                <input id="dr-from" type="date" value="2025-05-01" />
+                <span class="dash">→</span>
+                <input id="dr-to" type="date" value="2025-05-14" />
+              </div>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="chart-irrad"></canvas></div>
+        </div>
+
+      </div>
+
+      <footer>
+        <span>KARDASHEV-I · BUILD 0.1.4 · {a32e7c}</span>
+        <span>JENSEN · TMY3 · ACTUALIZADO HACE 2 min</span>
+      </footer>
+    </main>
+  </div>
+</div>
+
+<script>
+/* =========================================================
+   LANDING -> APP transition
+   ========================================================= */
+const landing = document.getElementById('landing');
+const app = document.getElementById('app');
+document.getElementById('enter-app').addEventListener('click', () => {
+  landing.classList.add('hidden');
+  app.classList.add('visible');
+  setTimeout(() => { initApp(); }, 300);
+});
+
+/* =========================================================
+   APP
+   ========================================================= */
+let mapInitialized = false;
+let chartsInitialized = false;
+
+function initApp(){
+  if (!mapInitialized) { initMap(); mapInitialized = true; }
+  if (!chartsInitialized) { initCharts(); chartsInitialized = true; }
+}
+
+/* ---------- Sliders ---------- */
+function paintRange(el){
+  const min = +el.min, max = +el.max, val = +el.value;
+  const pct = ((val - min) / (max - min)) * 100;
+  el.style.backgroundSize = pct + '% 100%';
+}
+const sldTilt = document.getElementById('sld-tilt');
+const sldAz = document.getElementById('sld-azimuth');
+const valTilt = document.getElementById('val-tilt');
+const valAz = document.getElementById('val-az');
+const valAzDir = document.getElementById('val-azdir');
+const needle = document.getElementById('needle');
+
+function azimuthLabel(az){
+  const dirs = [
+    {min:337.5,max:360,name:'NORTE'}, {min:0,max:22.5,name:'NORTE'},
+    {min:22.5,max:67.5,name:'NORESTE'},
+    {min:67.5,max:112.5,name:'ESTE'},
+    {min:112.5,max:157.5,name:'SURESTE'},
+    {min:157.5,max:202.5,name:'SUR'},
+    {min:202.5,max:247.5,name:'SUROESTE'},
+    {min:247.5,max:292.5,name:'OESTE'},
+    {min:292.5,max:337.5,name:'NOROESTE'}
+  ];
+  for(const d of dirs) if(az>=d.min && az<d.max) return d.name;
+  return 'NORTE';
+}
+function updateAzimuth(){
+  const v = +sldAz.value;
+  valAz.textContent = v;
+  needle.style.transform = `translate(-50%,-100%) rotate(${v}deg)`;
+  const name = azimuthLabel(v);
+  const suffix = (v>135 && v<225) ? ' · óptimo en hemisferio N' : (v>315 || v<45) ? ' · óptimo en hemisferio S' : '';
+  valAzDir.textContent = name + suffix;
+  paintRange(sldAz);
+}
+sldTilt.addEventListener('input', () => { valTilt.textContent = sldTilt.value; paintRange(sldTilt); });
+sldAz.addEventListener('input', updateAzimuth);
+paintRange(sldTilt); updateAzimuth();
+
+/* ---------- Calc button (demo: blink + briefly show alert if invalid) ---------- */
+document.getElementById('btn-calc').addEventListener('click', () => {
+  const lat = parseFloat(document.getElementById('inp-lat').value);
+  const lon = parseFloat(document.getElementById('inp-lon').value);
+  const eff = parseFloat(document.getElementById('inp-eff').value);
+  const pr  = parseFloat(document.getElementById('inp-pr').value);
+  const err = document.getElementById('error-alert');
+  const invalid =
+    isNaN(lat) || lat<-90 || lat>90 ||
+    isNaN(lon) || lon<-180 || lon>180 ||
+    isNaN(eff) || eff<0 || eff>1 ||
+    isNaN(pr) || pr<0 || pr>1;
+  if (invalid){
+    err.classList.remove('hidden');
+  } else {
+    err.classList.add('hidden');
+  }
+});
+
+/* ---------- Map ---------- */
+let leafletMap, marker;
+function initMap(){
+  leafletMap = L.map('map', { zoomControl:true, attributionControl:false })
+    .setView([19.4326, -99.1332], 4);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18
+  }).addTo(leafletMap);
+
+  const icon = L.divIcon({
+    className:'',
+    html:'<div style="width:14px;height:14px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 4px rgba(251,191,36,.25),0 0 12px rgba(251,191,36,.8);border:2px solid #000"></div>',
+    iconSize:[14,14],
+    iconAnchor:[7,7]
+  });
+  marker = L.marker([19.4326,-99.1332], {draggable:true, icon}).addTo(leafletMap);
+  marker.on('drag', (e) => {
+    const {lat,lng} = e.target.getLatLng();
+    document.getElementById('inp-lat').value = lat.toFixed(4);
+    document.getElementById('inp-lon').value = lng.toFixed(4);
+  });
+  leafletMap.on('click', (e) => {
+    marker.setLatLng(e.latlng);
+    document.getElementById('inp-lat').value = e.latlng.lat.toFixed(4);
+    document.getElementById('inp-lon').value = e.latlng.lng.toFixed(4);
+  });
+  setTimeout(()=>leafletMap.invalidateSize(), 200);
+}
+
+/* ---------- Charts ---------- */
+function initCharts(){
+  // ---- Chart defaults
+  Chart.defaults.font.family = "'Inter', sans-serif";
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = '#a1a1a1';
+  Chart.defaults.borderColor = '#1a1a1a';
+
+  /* Daily generation, full year (365 days, synthetic) */
+  const days = 365;
+  const dailyLabels = [];
+  const dailyData = [];
+  const start = new Date(2025, 0, 1);
+  for (let i=0;i<days;i++){
+    const d = new Date(start.getTime() + i*86400000);
+    dailyLabels.push(d);
+    // sinusoidal base + noise
+    const doy = i+1;
+    const base = 38 + 18*Math.sin((doy-80)/365 * 2*Math.PI);
+    const noise = (Math.sin(doy*0.7)*3 + Math.cos(doy*1.3)*4 + (Math.sin(doy*0.21)*5));
+    const cloudDrop = Math.random()<0.08 ? -Math.random()*12 : 0;
+    dailyData.push(Math.max(8, base + noise + cloudDrop));
+  }
+  // moving median 14d
+  function movMedian(arr, w){
+    const out=[];
+    for(let i=0;i<arr.length;i++){
+      const a=Math.max(0,i-Math.floor(w/2)), b=Math.min(arr.length,i+Math.ceil(w/2));
+      const slice=[...arr.slice(a,b)].sort((x,y)=>x-y);
+      out.push(slice[Math.floor(slice.length/2)]);
+    }
+    return out;
+  }
+  const dailyMed = movMedian(dailyData, 21);
+
+  const ctxDaily = document.getElementById('chart-daily').getContext('2d');
+  const gradient = ctxDaily.createLinearGradient(0,0,0,300);
+  gradient.addColorStop(0, 'rgba(251,191,36,.35)');
+  gradient.addColorStop(1, 'rgba(251,191,36,0)');
+
+  const dailyChart = new Chart(ctxDaily, {
+    type:'line',
+    data:{
+      labels: dailyLabels,
+      datasets:[
+        {
+          label:'Generación',
+          data: dailyData,
+          borderColor:'#fbbf24',
+          backgroundColor:gradient,
+          borderWidth:1.4,
+          fill:true,
+          pointRadius:0,
+          pointHoverRadius:3,
+          pointHoverBackgroundColor:'#fbbf24',
+          pointHoverBorderColor:'#000',
+          tension:.25
+        },
+        {
+          label:'Mediana móvil',
+          data: dailyMed,
+          borderColor:'#525252',
+          borderWidth:1.2,
+          borderDash:[4,4],
+          fill:false,
+          pointRadius:0,
+          tension:.4
+        }
+      ]
+    },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0a0a0a',borderColor:'#262626',borderWidth:1,
+          titleColor:'#ededed',bodyColor:'#a1a1a1',padding:10,boxPadding:4,
+          callbacks:{
+            title:(items)=> items[0].label,
+            label:(item)=> ` ${item.dataset.label}: ${item.formattedValue} kWh`
+          }
+        }
+      },
+      scales:{
+        x:{
+          type:'time',
+          time:{unit:'month',displayFormats:{month:'MMM'}},
+          grid:{display:false},
+          ticks:{color:'#666'},
+          border:{color:'#1a1a1a'}
+        },
+        y:{
+          grid:{color:'#141414'},
+          ticks:{color:'#666',callback:(v)=>v+' kWh'},
+          border:{display:false}
+        }
+      }
+    }
+  });
+
+  // toggle daily range
+  document.getElementById('seg-daily').addEventListener('click',(e)=>{
+    const btn = e.target.closest('button'); if(!btn) return;
+    [...e.currentTarget.children].forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    const range = btn.dataset.range;
+    let n = 365;
+    if (range==='1M') n=30;
+    else if (range==='3M') n=90;
+    else if (range==='6M') n=180;
+    else if (range==='YTD') n=Math.floor((Date.now()-new Date(2025,0,1))/86400000) % 365 || 140;
+    else n=365;
+    dailyChart.data.labels = dailyLabels.slice(-n);
+    dailyChart.data.datasets[0].data = dailyData.slice(-n);
+    dailyChart.data.datasets[1].data = dailyMed.slice(-n);
+    dailyChart.update('none');
+  });
+
+  /* Monthly bars */
+  const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  const monthData = [1085, 1140, 1340, 1480, 1612, 1525, 1488, 1470, 1395, 1240, 1095, 962];
+  const ctxMon = document.getElementById('chart-monthly').getContext('2d');
+  new Chart(ctxMon, {
+    type:'bar',
+    data:{
+      labels: months,
+      datasets:[{
+        label:'kWh',
+        data: monthData,
+        backgroundColor: months.map((_,i)=> i===4 ? '#fbbf24' : 'rgba(251,191,36,.55)'),
+        hoverBackgroundColor:'#fbbf24',
+        borderRadius:3,
+        borderSkipped:false,
+        barThickness:14
+      }]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0a0a0a',borderColor:'#262626',borderWidth:1,
+          titleColor:'#ededed',bodyColor:'#a1a1a1',padding:10,
+          callbacks:{label:(it)=>` ${it.formattedValue} kWh`}
+        }
+      },
+      scales:{
+        x:{grid:{display:false},ticks:{color:'#a1a1a1'},border:{color:'#1a1a1a'}},
+        y:{grid:{color:'#141414'},ticks:{color:'#666',callback:(v)=>v+' kWh'},border:{display:false}}
+      }
+    }
+  });
+
+  /* GHI vs POA over date range */
+  const irradLabels = [];
+  const ghi = [];
+  const poa = [];
+  // hourly across 14 days
+  const totalH = 14*24;
+  for(let h=0;h<totalH;h++){
+    const day = Math.floor(h/24);
+    const hr = h%24;
+    irradLabels.push(`D${day+1} ${String(hr).padStart(2,'0')}:00`);
+    // sun curve
+    const angle = (hr-12)/6;
+    const sun = Math.max(0, Math.cos(angle*Math.PI/2));
+    // cloud factor per day
+    const cloud = 0.85 + Math.sin(day*1.7)*0.12 + (Math.random()*0.05);
+    const ghiVal = sun * 980 * cloud;
+    const poaVal = sun * 980 * cloud * (1 + 0.12*Math.cos((hr-12)/6 * 0.8)); // POA slightly higher when tilted
+    ghi.push(Math.round(ghiVal));
+    poa.push(Math.round(Math.max(poaVal, ghiVal*0.97)));
+  }
+
+  const ctxIrr = document.getElementById('chart-irrad').getContext('2d');
+  const gradPOA = ctxIrr.createLinearGradient(0,0,0,260);
+  gradPOA.addColorStop(0,'rgba(251,191,36,.25)');
+  gradPOA.addColorStop(1,'rgba(251,191,36,0)');
+
+  new Chart(ctxIrr, {
+    type:'line',
+    data:{
+      labels: irradLabels,
+      datasets:[
+        {label:'GHI',data:ghi,borderColor:'#60a5fa',backgroundColor:'rgba(96,165,250,.06)',borderWidth:1.2,pointRadius:0,fill:false,tension:.35},
+        {label:'POA',data:poa,borderColor:'#fbbf24',backgroundColor:gradPOA,borderWidth:1.4,pointRadius:0,fill:true,tension:.35}
+      ]
+    },
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0a0a0a',borderColor:'#262626',borderWidth:1,
+          titleColor:'#ededed',bodyColor:'#a1a1a1',padding:10,
+          callbacks:{label:(it)=>` ${it.dataset.label}: ${it.formattedValue} W/m²`}
+        }
+      },
+      scales:{
+        x:{grid:{display:false},ticks:{color:'#666',maxTicksLimit:7,autoSkip:true},border:{color:'#1a1a1a'}},
+        y:{grid:{color:'#141414'},ticks:{color:'#666',callback:(v)=>v+' W/m²'},border:{display:false}}
+      }
+    }
+  });
+}
+
+/* Skip landing on hash for quick preview */
+if (location.hash === '#app') {
+  landing.classList.add('hidden');
+  app.classList.add('visible');
+  setTimeout(initApp, 100);
+}
+</script>
+</body>
+</html>

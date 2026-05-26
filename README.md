@@ -1,5 +1,4 @@
 # Kardashev-I
-# Autores: Riojo bot
 
-# ssñae
-
+Autores:
+Emil 

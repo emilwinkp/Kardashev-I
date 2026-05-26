@@ -1,0 +1,7 @@
+pvlib
+pandas
+numpy
+plotly
+dash
+dash-bootstrap-components
+dash-leaflet
