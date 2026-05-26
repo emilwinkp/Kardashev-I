@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Dash debug artifacts
+layout.json
+
+# Environments
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -25,5 +25,7 @@ def calculate(lat, lon, tz, tilt, azimuth, area, efficiency, PR):
     df = pd.DataFrame(irradiance_total, index=tiempos)
     df['ghi'] = clearsky['ghi']
     df['potencia_generada'] = df['poa_global'] * area * efficiency * PR
+    # Energia generada quinceminutalmente en kWh (dividimos por 1000 para convertir de W a kW y multiplicamos por 0.25 para convertir de horas a quinceminas)
+    df['energia_generada_kWh'] = (df['poa_global'] * area * efficiency * PR * 0.25) / 1000
 
     return df
