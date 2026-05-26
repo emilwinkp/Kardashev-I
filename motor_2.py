@@ -53,7 +53,7 @@ print(irradiance_total)
 df_irradiacion = pd.DataFrame(irradiance_total)
 
 #5. Información de sistema PV
-area = float(input("Inserta área del panel en m^2"))
+area = 2
 efficiency = float(input("Inserta eficiencia del panel (en decimal)"))
 if efficiency < 0 or efficiency > 1:
     print('La eficiencia debe ser un valor entre 0 y 1')
@@ -64,9 +64,10 @@ if PR < 0 or PR > 1:
     print('El Performance Ratio debe ser un valor entre 0 y 1')
     sys.exit()  
 
+cant_paneles = int(input("Inserta cantidad de paneles"))
+
 #6. Cálculo de potencia generada
-df_irradiacion['potencia_generada'] = df_irradiacion['poa_global'] * area * efficiency * PR
+df_irradiacion['potencia_generada'] = df_irradiacion['poa_global'] * area * efficiency * PR * cant_paneles
 print(df_irradiacion['potencia_generada'])
 potencia_gen_ano = df_irradiacion['potencia_generada'].sum()
 print(potencia_gen_ano)
-

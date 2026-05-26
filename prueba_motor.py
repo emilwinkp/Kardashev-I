@@ -17,7 +17,7 @@ azimuth_vals = sol['azimuth'].values
 # Aquí clearsky sale como diccionario de arrays de numpy
 clearsky = pvlib.clearsky.ineichen(zenith_vals, airmass_absolute=1.5, linke_turbidity=3, altitude=500)
 
-#4. Transportación (Cákculo del panel)
+#4. Transportación (Cálculo del panel)
 #Quitar values porque ya son numeros puros
 irradiance_total = pvlib.irradiance.get_total_irradiance(
     surface_tilt=25,
