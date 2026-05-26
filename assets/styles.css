@@ -163,6 +163,9 @@ a{color:inherit;text-decoration:none}
   border-radius:8px;
   font-size:13px;
   font-family:var(--mono);
+  line-height:1.4;
+  -webkit-appearance:none;
+  appearance:none;
   transition:border-color .15s ease, background .15s ease;
   outline:none;
 }
@@ -191,8 +194,9 @@ a{color:inherit;text-decoration:none}
 .slider-value-input{
   background:transparent;border:none;color:var(--fg);
   font-family:var(--mono);font-size:18px;font-weight:500;
-  letter-spacing:-.01em;
+  letter-spacing:-.01em;line-height:1;
   width:46px;text-align:right;padding:0;outline:none;
+  -webkit-appearance:none;appearance:none;
   -moz-appearance:textfield;cursor:text;
 }
 .slider-value-input:hover,.slider-value-input:focus{color:var(--accent)}
@@ -355,7 +359,8 @@ input[type=range]::-moz-range-thumb{
 .range-row .lbl{font-family:var(--mono);font-size:10.5px;color:var(--fg-3);letter-spacing:.05em;text-transform:uppercase}
 .range-row input{
   background:transparent;border:none;color:var(--fg);font-family:var(--mono);font-size:11.5px;
-  padding:4px 6px;outline:none;width:115px;
+  padding:4px 6px;outline:none;width:115px;line-height:1.4;
+  -webkit-appearance:none;appearance:none;
   color-scheme:dark;
 }
 .range-row .dash{color:var(--fg-4);font-family:var(--mono)}
