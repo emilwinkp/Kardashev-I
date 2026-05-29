@@ -14,7 +14,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from timezonefinder import TimezoneFinder
+
 from motor_2 import calculate
+
+_tf = TimezoneFinder()
 
 
 # ───────────────────────── Constantes ──────────────────────────────────────────
@@ -310,9 +314,10 @@ sidebar = html.Aside(className="sidebar", children=[
             ]),
         ]),
         html.Div(className="field", children=[
-            html.Label(["Zona horaria ", html.Span("IANA", className="hint")]),
+            html.Label(["Zona horaria ", html.Span("auto", className="hint")]),
             dcc.Input(id="inp-tz", type="text", value=TZ_DEFAULT,
-                      className="input", debounce=True),
+                      className="input", readOnly=True,
+                      style={"opacity": "0.6", "cursor": "default"}),
         ]),
     ]),
 
@@ -824,6 +829,18 @@ clientside_callback(
 
 
 # ───────────────────────── Server callbacks ────────────────────────────────────
+
+@callback(
+    Output("inp-tz", "value"),
+    Input("inp-lat", "value"),
+    Input("inp-lon", "value"),
+)
+def auto_timezone(lat, lon):
+    if lat is None or lon is None:
+        return TZ_DEFAULT
+    tz = _tf.timezone_at(lat=lat, lng=lon)
+    return tz if tz else TZ_DEFAULT
+
 
 @callback(
     Output("map-marker", "center"),
