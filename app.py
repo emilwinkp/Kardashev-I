@@ -26,6 +26,9 @@ ACCENT = "#fbbf24"
 ACCENT_FILL = "rgba(251,191,36,0.20)"
 ACCENT_FILL_SOFT = "rgba(251,191,36,0.55)"
 INFO = "#60a5fa"
+INFO_CMP = "#818cf8"
+ACCENT_CMP = "#fb923c"
+ACCENT_CMP_FILL = "rgba(251,146,60,0.15)"
 DANGER = "#f43f5e"
 
 PAPER_BG = "rgba(0,0,0,0)"
@@ -163,22 +166,81 @@ def build_monthly_fig(df_monthly, peak_idx):
     return fig
 
 
-def build_irradiance_fig(sample):
+def build_irradiance_fig(sample, sample2=None):
+    # Normalize both ranges to start at the same reference point so curves
+    # overlay directly. Hover shows the actual original date for each trace.
+    ref_start = sample.index[0].normalize()
+
+    def _shift(s):
+        delta = s.index[0].normalize() - ref_start
+        shifted = s.copy()
+        shifted.index = s.index - delta
+        return shifted
+
+    s1 = _shift(sample)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=sample.index, y=sample["ghi"], name="GHI", mode="lines",
+        x=s1.index, y=s1["ghi"], name="GHI ①", mode="lines",
         line=dict(color=INFO, width=1.2),
         hovertemplate="<b>%{x|%d %b %H:%M}</b><br>GHI: %{y:.0f} W/m²<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=sample.index, y=sample["poa_global"], name="POA", mode="lines",
+        x=s1.index, y=s1["poa_global"], name="POA ①", mode="lines",
         line=dict(color=ACCENT, width=1.4),
         fill="tozeroy", fillcolor=ACCENT_FILL,
         hovertemplate="<b>%{x|%d %b %H:%M}</b><br>POA: %{y:.0f} W/m²<extra></extra>",
     ))
+
+    has_cmp = sample2 is not None and not sample2.empty
+    if has_cmp:
+        s2 = _shift(sample2)
+        rng2_label = (f"{sample2.index[0].strftime('%d %b')} → "
+                      f"{sample2.index[-1].strftime('%d %b')}")
+        dates2 = sample2.index.strftime("%d %b %H:%M")
+        fig.add_trace(go.Scatter(
+            x=s2.index, y=s2["ghi"], name="GHI ②", mode="lines",
+            line=dict(color=INFO_CMP, width=1.2, dash="dot"),
+            customdata=dates2,
+            hovertemplate=(
+                f"<span style='color:{INFO_CMP};font-size:10px'>"
+                f"② {rng2_label}</span><br>"
+                "<b>%{customdata}</b><br>"
+                "GHI: %{y:.0f} W/m²<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=s2.index, y=s2["poa_global"], name="POA ②", mode="lines",
+            line=dict(color=ACCENT_CMP, width=1.4, dash="dot"),
+            fill="tozeroy", fillcolor=ACCENT_CMP_FILL,
+            customdata=dates2,
+            hovertemplate=(
+                f"<span style='color:{ACCENT_CMP};font-size:10px'>"
+                f"② {rng2_label}</span><br>"
+                "<b>%{customdata}</b><br>"
+                "POA: %{y:.0f} W/m²<extra></extra>"
+            ),
+        ))
+
+    r1 = (f"{sample.index[0].strftime('%d %b')} – "
+          f"{sample.index[-1].strftime('%d %b')}")
+    ann_text = f"─── {r1}"
+    if has_cmp:
+        r2 = (f"{sample2.index[0].strftime('%d %b')} – "
+              f"{sample2.index[-1].strftime('%d %b')}")
+        ann_text += f"&nbsp;&nbsp;&nbsp;╌╌╌ {r2}"
+
     fig.update_layout(**_base_layout())
+    fig.update_layout(showlegend=False)
     fig.update_layout(**_axes(" W/m²"))
     fig.update_layout(hovermode="x unified")
+    fig.add_annotation(
+        text=ann_text,
+        xref="paper", yref="paper",
+        x=1, y=1,
+        xanchor="right", yanchor="bottom",
+        showarrow=False,
+        font=dict(size=9, color="#525252", family=FONT_FAMILY),
+    )
     fig.update_xaxes(type="date")
     return fig
 
@@ -580,28 +642,24 @@ main = html.Main(className="main", children=[
                     html.P("W/m² sobre el rango seleccionado",
                            className="card-sub"),
                 ]),
-                html.Div(className="card-actions", children=[
-                    html.Div(className="legend", children=[
-                        html.Span([
-                            html.Span(className="swatch",
-                                      style={"background": INFO}), "GHI",
-                        ]),
-                        html.Span([
-                            html.Span(className="swatch",
-                                      style={"background": ACCENT}), "POA",
-                        ]),
+                html.Div(className="legend", children=[
+                    html.Span([
+                        html.Span(className="swatch",
+                                  style={"background": INFO}), "GHI ①",
                     ]),
-                    html.Div(className="range-row", children=[
-                        html.Span("RANGO", className="lbl"),
-                        dcc.Input(id="dr-from", type="text",
-                                  value="2026-06-20",
-                                  placeholder="YYYY-MM-DD",
-                                  debounce=True),
-                        html.Span("→", className="dash"),
-                        dcc.Input(id="dr-to", type="text",
-                                  value="2026-06-26",
-                                  placeholder="YYYY-MM-DD",
-                                  debounce=True),
+                    html.Span([
+                        html.Span(className="swatch",
+                                  style={"background": ACCENT}), "POA ①",
+                    ]),
+                    html.Span([
+                        html.Span(className="swatch",
+                                  style={"background": INFO_CMP,
+                                         "opacity": "0.7"}), "GHI ②",
+                    ]),
+                    html.Span([
+                        html.Span(className="swatch",
+                                  style={"background": ACCENT_CMP,
+                                         "opacity": "0.7"}), "POA ②",
                     ]),
                 ]),
             ]),
@@ -611,6 +669,28 @@ main = html.Main(className="main", children=[
                           config={"displayModeBar": False,
                                   "doubleClick": "reset+autosize"},
                           style={"height": "260px", "width": "100%"}),
+            ]),
+            html.Div(className="range-stack", style={"display": "none"}, children=[
+                html.Div(className="range-row", children=[
+                    dcc.Input(id="dr-from", type="text",
+                              value="2026-06-20",
+                              placeholder="YYYY-MM-DD",
+                              debounce=True),
+                    dcc.Input(id="dr-to", type="text",
+                              value="2026-06-26",
+                              placeholder="YYYY-MM-DD",
+                              debounce=True),
+                ]),
+                html.Div(className="range-row range-row--cmp", children=[
+                    dcc.Input(id="dr-from-2", type="text",
+                              value="2026-12-20",
+                              placeholder="YYYY-MM-DD",
+                              debounce=True),
+                    dcc.Input(id="dr-to-2", type="text",
+                              value="2026-12-26",
+                              placeholder="YYYY-MM-DD",
+                              debounce=True),
+                ]),
             ]),
         ]),
 
@@ -981,10 +1061,12 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
     Output("graph-irradiance", "figure"),
     Input("dr-from", "value"),
     Input("dr-to", "value"),
+    Input("dr-from-2", "value"),
+    Input("dr-to-2", "value"),
     Input("store-df", "data"),
     prevent_initial_call=True,
 )
-def update_irradiance(start, end, stored):
+def update_irradiance(start, end, start2, end2, stored):
     if stored is None:
         return empty_fig("Ejecuta el cálculo primero")
     if not start or not end:
@@ -997,7 +1079,17 @@ def update_irradiance(start, end, stored):
         return empty_fig("Rango de fechas inválido")
     if sample.empty:
         return empty_fig("Sin datos en el rango seleccionado")
-    return build_irradiance_fig(sample)
+
+    sample2 = None
+    if start2 and end2:
+        try:
+            s2 = df.loc[start2:end2]
+            if not s2.empty:
+                sample2 = s2
+        except Exception:
+            pass
+
+    return build_irradiance_fig(sample, sample2)
 
 
 @callback(
