@@ -3,14 +3,18 @@ import pandas as pd
 import numpy as np
 
 
-def calculate(lat, lon, tz, tilt, azimuth, area, efficiency, PR):
+def calculate(lat, lon, alt, tz, tilt, azimuth, area, efficiency, PR):
     tiempos = pd.date_range(start='2026-01-01 00:00', end='2026-12-31 23:59', freq='15min', tz=tz)
-
-    sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon)
+    pressure = pvlib.atmosphere.alt2pres(alt)
+    turbidity = pvlib.clearsky.lookup_linke_turbidity(tiempos, lat, lon)
+    
+    sol = pvlib.solarposition.get_solarposition(tiempos, lat, lon, alt, pressure = pressure)
     zenith_vals = sol['apparent_zenith'].values
     azimuth_vals = sol['azimuth'].values
+    airmass_rel = pvlib.atmosphere.get_relative_airmass(zenith_vals)
+    airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass_rel, pressure)
 
-    clearsky = pvlib.clearsky.ineichen(zenith_vals, airmass_absolute=1.5, linke_turbidity=3, altitude=500)
+    clearsky = pvlib.clearsky.ineichen(zenith_vals, airmass_absolute=airmass_abs, linke_turbidity= turbidity, altitude=alt)
 
     irradiance_total = pvlib.irradiance.get_total_irradiance(
         surface_tilt=tilt,

@@ -37,8 +37,11 @@ TOOLTIP_BG = "#0a0a0a"
 TOOLTIP_BD = "#262626"
 FONT_FAMILY = "Inter, system-ui, sans-serif"
 
+# Constantes default para el caso de Monterrey, Mexico
 LAT_DEFAULT = 25.7
 LON_DEFAULT = -100.3
+ALT_DEFAULT = 540 
+
 TZ_DEFAULT = "America/Mexico_City"
 TILT_DEFAULT = 22
 AZ_DEFAULT = 180
@@ -318,6 +321,11 @@ sidebar = html.Aside(className="sidebar", children=[
             dcc.Input(id="inp-tz", type="text", value=TZ_DEFAULT,
                       className="input", readOnly=True,
                       style={"opacity": "0.6", "cursor": "default"}),
+        ]),
+        html.Div(className="field", children=[
+            html.Label(["Altitud ", html.Span("msnm", className="hint")]),
+            dcc.Input(id="inp-alt", type="number", value=ALT_DEFAULT,
+                      step=1, min=0, max=8848, className="input", debounce=True),
         ]),
     ]),
 
@@ -889,13 +897,14 @@ def sync_landing_meta(lat, lon, tz):
     State("inp-tz", "value"),
     State("sld-tilt", "value"),
     State("sld-azimuth", "value"),
+    State("inp-alt", "value"),
     State("inp-n-panels", "value"),
     State("inp-area", "value"),
     State("inp-eff", "value"),
     State("inp-pr", "value"),
     prevent_initial_call=True,
 )
-def run_calculation(_, lat, lon, tz, tilt, azimuth, n_panels, area, eff, pr):
+def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr):
     blank = empty_fig()
     try:
         if lat is None or lon is None or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
@@ -904,10 +913,12 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, n_panels, area, eff, pr):
             raise ValueError("η y PR deben estar entre 0 y 1.")
         if area is None or area <= 0:
             raise ValueError("Área por panel debe ser mayor que 0.")
+        if alt is None or alt < 0:
+            raise ValueError("Altitud debe ser ≥ 0 msnm.")
         n = int(n_panels) if n_panels and n_panels >= 1 else 1
         total_area = n * float(area)
 
-        df = calculate(lat, lon, tz or TZ_DEFAULT,
+        df = calculate(lat, lon, float(alt), tz or TZ_DEFAULT,
                        float(tilt), float(azimuth),
                        total_area, float(eff), float(pr))
 
