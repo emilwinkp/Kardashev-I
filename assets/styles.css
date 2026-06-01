@@ -363,7 +363,8 @@ input[type=range]::-moz-range-thumb{
   -webkit-appearance:none;appearance:none;
   color-scheme:dark;
 }
-.range-row .dash{color:var(--fg-4);font-family:var(--mono)}
+.range-stack{display:flex;flex-direction:column;gap:4px}
+.range-row--cmp{border-left:2px solid #fb923c}
 
 .col-7{grid-column:span 7}
 .col-5{grid-column:span 5}
