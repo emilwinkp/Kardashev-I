@@ -560,7 +560,7 @@ main = html.Main(className="main", children=[
                 html.Div(className="card-titlewrap", children=[
                     html.H3("Generación diaria · año completo",
                             className="card-title"),
-                    html.P("kWh/día estimados a partir de POA · Jensen + clear-sky",
+                    html.P("kWh/día estimados a partir de POA · Jensen + clear-sky/ineichen",
                            className="card-sub"),
                 ]),
                 html.Div(className="card-actions", children=[
