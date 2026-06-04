@@ -89,6 +89,7 @@ def simular_operacion_industrial_mixta(df_solar, ruta_csv_demanda, cap_respaldo_
     periodos_por_apagon = max(1, int(duracion_horas_apagon * 4))
     
     df['apagon'] = False
+    random.seed(42)
     inicios_apagones = random.sample(range(0, len(df) - periodos_por_apagon), num_apagones)
     for inicio in inicios_apagones:
         df.iloc[inicio:inicio+periodos_por_apagon, df.columns.get_loc('apagon')] = True

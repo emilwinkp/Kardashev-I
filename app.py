@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from timezonefinder import TimezoneFinder
 
 from motor_2 import calculate
+from motor_financiero import HORIZONTE_ANIOS, simular_financiero
 
 _tf = TimezoneFinder()
 
@@ -52,6 +53,15 @@ AREA_DEFAULT = 2.1      # m² por panel
 N_PANELS_DEFAULT = 20   # número de paneles → total 42 m²
 EFF_DEFAULT = 0.21
 PR_DEFAULT = 0.82
+
+# Defaults financieros (editables en la página de análisis)
+COSTO_PANEL_M2_DEFAULT = 1000     # MXN / m²
+COSTO_PILA_DEFAULT = 500000       # MXN / pila (100 kWh)
+NUM_APAGONES_DEFAULT = 30
+DUR_APAGON_DEFAULT = 1.5          # horas
+CAP_RESPALDO_DEFAULT = 500        # kWh
+
+SUCCESS = "#22c55e"
 
 MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -265,6 +275,95 @@ def build_energy_15min_fig(sample):
     return fig
 
 
+# ───────────────────────── Finance figures ─────────────────────────────────────
+def build_bill_compare_fig(df_sis, df_base):
+    """Recibo CFE mensual: base (sin sistema) vs con sistema FV."""
+    meses = [MESES_ES_SHORT[m - 1] for m in df_base["Mes"]]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=meses, y=df_base["Total_CFE_MXN"], name="Sin sistema",
+        marker=dict(color=ACCENT_FILL_SOFT),
+        hovertemplate="<b>%{x}</b><br>Base: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=meses, y=df_sis["Total_CFE_MXN"], name="Con sistema",
+        marker=dict(color=ACCENT),
+        hovertemplate="<b>%{x}</b><br>Sistema: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(**_base_layout(margin_l=55))
+    fig.update_layout(**_axes())
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.1)
+    fig.update_yaxes(tickprefix="$")
+    return fig
+
+
+def build_energy_month_fig(df_e):
+    """Energía mensual: demanda vs compra a la red vs generación solar."""
+    meses = [MESES_ES_SHORT[m - 1] for m in df_e["Mes"]]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=meses, y=df_e["Demanda_kWh"], name="Demanda",
+        marker=dict(color=INFO),
+        hovertemplate="<b>%{x}</b><br>Demanda: %{y:,.0f} kWh<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=meses, y=df_e["Compra_Red_kWh"], name="Compra red",
+        marker=dict(color=DANGER),
+        hovertemplate="<b>%{x}</b><br>Red: %{y:,.0f} kWh<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=meses, y=df_e["Solar_Generada_kWh"], name="Solar generada",
+        mode="lines+markers", line=dict(color=ACCENT, width=2),
+        hovertemplate="<b>%{x}</b><br>Solar: %{y:,.0f} kWh<extra></extra>",
+    ))
+    fig.update_layout(**_base_layout(margin_l=55))
+    fig.update_layout(**_axes(" kWh"))
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.1)
+    return fig
+
+
+def build_curtail_fig(df_e):
+    """Energía solar desperdiciada (curtailment) por mes."""
+    meses = [MESES_ES_SHORT[m - 1] for m in df_e["Mes"]]
+    fig = go.Figure(go.Bar(
+        x=meses, y=df_e["Desperdicio_kWh"],
+        marker=dict(color=ACCENT_CMP),
+        hovertemplate="<b>%{x}</b><br>%{y:,.0f} kWh desperdiciados<extra></extra>",
+        width=0.55,
+    ))
+    fig.update_layout(**_base_layout(margin_l=55))
+    fig.update_layout(**_axes(" kWh"))
+    fig.update_layout(bargap=0.3)
+    return fig
+
+
+def build_recibo_table(df):
+    """Render a DataFrame as a styled HTML table."""
+    header = html.Thead(html.Tr([html.Th(c) for c in df.columns]))
+    rows = []
+    for _, r in df.iterrows():
+        cells = []
+        for c in df.columns:
+            v = r[c]
+            if isinstance(v, float):
+                txt = f"{v:,.2f}" if c != "FP_Mensual" else f"{v:.3f}"
+            else:
+                txt = str(v)
+            cells.append(html.Td(txt))
+        rows.append(html.Tr(cells))
+    return html.Table(className="fin-table", children=[header, html.Tbody(rows)])
+
+
+def build_recommendations(recs):
+    items = []
+    for r in recs:
+        items.append(html.Div(className=f"rec rec-{r['tipo']}", children=[
+            html.Span(className="rec-dot"),
+            html.Span(r["texto"], className="rec-text"),
+        ]))
+    return items
+
+
 # ───────────────────────── SVG icons (inline) ──────────────────────────────────
 ICON_FG = "#a1a1a1"
 ICON_BTN = "#000000"
@@ -276,6 +375,11 @@ _ICON_SUN = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="
 _ICON_ARROW = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_BTN}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>'
 _ICON_BOLT = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_BTN}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>'
 _ICON_ALERT = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{DANGER}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>'
+_ICON_MONEY = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_FG}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>'
+_ICON_CLOCK = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_FG}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+_ICON_TREND = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_FG}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg>'
+_ICON_PIGGY = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_FG}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 5c-1.5 0-2.8 1.4-3 2-3.5-1.5-11-.3-11 5 0 1.8 0 3 2 4.5V20h4v-2h3v2h4v-4c1-.5 1.7-1 2-2h2v-4h-2c0-1-.5-1.5-1-2V5z"/><path d="M9 8h4"/></svg>'
+_ICON_WASTE = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{ICON_FG}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m5 0V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/></svg>'
 
 
 # ───────────────────────── Landing ─────────────────────────────────────────────
@@ -321,6 +425,12 @@ topbar = html.Header(className="topbar", children=[
             html.Span("/"),
             " Simulador FV",
         ]),
+    ]),
+    html.Nav(className="topnav", children=[
+        dcc.Link("Simulador FV", href="/sim", id="nav-sim",
+                 className="nav-link active"),
+        dcc.Link("Análisis ROI", href="/finanzas", id="nav-fin",
+                 className="nav-link"),
     ]),
     html.Div(className="topbar-right", children=[
         html.Div(className="pill", children=[
@@ -741,9 +851,234 @@ main = html.Main(className="main", children=[
 ])
 
 
+# ───────────────────────── Finance page ────────────────────────────────────────
+def fin_kpi(card_id, label, icon_svg):
+    return html.Div(className="kpi", children=[
+        html.Div(className="kpi-head", children=[
+            html.Div(label, className="kpi-label"),
+            html.Div(className="kpi-icn", children=[svg_img(icon_svg, 14, 14)]),
+        ]),
+        html.Div("—", id=card_id, className="kpi-value"),
+        html.Div("", id=f"{card_id}-foot", className="kpi-foot"),
+    ])
+
+
+finance_page = html.Main(className="main", children=[
+    html.Div(id="fin-error-alert", className="alert hidden", children=[
+        svg_img(_ICON_ALERT, 18, 18, className="icn"),
+        html.Div(className="body", children=[
+            html.Strong("Error en el análisis"),
+            html.Span("", id="fin-error-msg"),
+        ]),
+    ]),
+
+    html.Div(className="page-head", children=[
+        html.Div(children=[
+            html.H1("Análisis financiero & ROI"),
+            html.P("Sube la demanda real y evalúa la inversión del sistema FV.",
+                   className="sub"),
+        ]),
+        html.Div(className="meta", children=[
+            "TARIFA CFE GDMTH · AUTOCONSUMO + BATERÍAS",
+        ]),
+    ]),
+
+    # ── Configuración del análisis ──
+    html.Div(className="card col-12", style={"marginBottom": "14px"}, children=[
+        html.Div(className="card-head", children=[
+            html.Div(className="card-titlewrap", children=[
+                html.H3("Configuración del análisis", className="card-title"),
+                html.P("Carga el perfil de demanda y ajusta los costos de inversión.",
+                       className="card-sub"),
+            ]),
+        ]),
+        html.Div(className="fin-config", children=[
+            dcc.Upload(
+                id="upload-demanda",
+                className="fin-upload",
+                children=html.Div([
+                    svg_img(_ICON_ENERGY, 18, 18),
+                    html.Div([
+                        html.Strong("Arrastra o haz clic"),
+                        html.Span(" para subir el CSV de demanda", className="fin-up-sub"),
+                    ]),
+                    html.Div(
+                        "Columnas: Fecha_Hora · Energia_kWh · Energia_kVArh (15 min, 2026)",
+                        className="fin-up-hint"),
+                ]),
+                multiple=False,
+                accept=".csv",
+            ),
+            html.Div(id="fin-upload-status", className="fin-up-status"),
+
+            html.Div(className="fin-inputs", children=[
+                html.Div(className="field", children=[
+                    html.Label(["Costo panel ", html.Span("MXN/m²", className="hint")]),
+                    dcc.Input(id="inp-costo-panel", type="number",
+                              value=COSTO_PANEL_M2_DEFAULT, step=50, min=0,
+                              className="input", debounce=True),
+                ]),
+                html.Div(className="field", children=[
+                    html.Label(["Costo pila ", html.Span("MXN/100kWh", className="hint")]),
+                    dcc.Input(id="inp-costo-pila", type="number",
+                              value=COSTO_PILA_DEFAULT, step=10000, min=0,
+                              className="input", debounce=True),
+                ]),
+                html.Div(className="field", children=[
+                    html.Label(["Núm. apagones ", html.Span("/año", className="hint")]),
+                    dcc.Input(id="inp-num-apagones", type="number",
+                              value=NUM_APAGONES_DEFAULT, step=1, min=0,
+                              className="input", debounce=True),
+                ]),
+                html.Div(className="field", children=[
+                    html.Label(["Duración apagón ", html.Span("h", className="hint")]),
+                    dcc.Input(id="inp-dur-apagon", type="number",
+                              value=DUR_APAGON_DEFAULT, step=0.5, min=0,
+                              className="input", debounce=True),
+                ]),
+                html.Div(className="field", children=[
+                    html.Label(["Cap. respaldo ", html.Span("kWh", className="hint")]),
+                    dcc.Input(id="inp-cap-respaldo", type="number",
+                              value=CAP_RESPALDO_DEFAULT, step=50, min=0,
+                              className="input", debounce=True),
+                ]),
+            ]),
+            html.Button(id="btn-fin-run", className="calc-btn", n_clicks=0, children=[
+                svg_img(_ICON_BOLT, 14, 14),
+                html.Span("Ejecutar análisis"),
+            ]),
+        ]),
+    ]),
+
+    # ── KPIs ──
+    html.Div(className="kpis", style={"gridTemplateColumns": "repeat(5,1fr)"}, children=[
+        fin_kpi("kpi-roi", "ROI (horizonte)", _ICON_TREND),
+        fin_kpi("kpi-payback", "Payback", _ICON_CLOCK),
+        fin_kpi("kpi-npv", "VPN", _ICON_MONEY),
+        fin_kpi("kpi-ahorro", "Ahorro anual CFE", _ICON_PIGGY),
+        fin_kpi("kpi-curtail", "Curtailment", _ICON_WASTE),
+    ]),
+
+    # ── Charts ──
+    html.Div(className="grid-12", children=[
+        html.Div(className="card col-7", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Recibo CFE mensual · base vs sistema",
+                            className="card-title"),
+                    html.P("MXN por mes con y sin sistema fotovoltaico",
+                           className="card-sub"),
+                ]),
+                html.Div(className="legend", children=[
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": ACCENT_FILL_SOFT}),
+                               "Sin sistema"]),
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": ACCENT}),
+                               "Con sistema"]),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="fin-graph-bill", figure=empty_fig("Ejecuta el análisis"),
+                          config={"displayModeBar": False},
+                          style={"height": "280px", "width": "100%"}),
+            ]),
+        ]),
+        html.Div(className="card col-5", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Curtailment mensual", className="card-title"),
+                    html.P("Energía solar desperdiciada (kWh)", className="card-sub"),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="fin-graph-curtail", figure=empty_fig("Ejecuta el análisis"),
+                          config={"displayModeBar": False},
+                          style={"height": "280px", "width": "100%"}),
+            ]),
+        ]),
+        html.Div(className="card col-12 row-gap-14", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Energía mensual · demanda, red y solar",
+                            className="card-title"),
+                    html.P("Demanda total vs compra a la red vs generación solar",
+                           className="card-sub"),
+                ]),
+                html.Div(className="legend", children=[
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": INFO}), "Demanda"]),
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": DANGER}), "Compra red"]),
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": ACCENT}), "Solar"]),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="fin-graph-energy", figure=empty_fig("Ejecuta el análisis"),
+                          config={"displayModeBar": False},
+                          style={"height": "300px", "width": "100%"}),
+            ]),
+        ]),
+
+        # Recomendaciones
+        html.Div(className="card col-7 row-gap-14", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Recomendaciones", className="card-title"),
+                    html.P("Lectura automática de los KPIs del proyecto",
+                           className="card-sub"),
+                ]),
+            ]),
+            html.Div(id="fin-recommendations", className="rec-list", children=[
+                html.Div("Ejecuta el análisis para ver recomendaciones.",
+                         className="rec-empty"),
+            ]),
+        ]),
+
+        # Resumen de inversión
+        html.Div(className="card col-5 row-gap-14", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Resumen de inversión", className="card-title"),
+                    html.P("Desglose del CapEx y dimensionamiento", className="card-sub"),
+                ]),
+            ]),
+            html.Div(id="fin-capex-summary", className="fin-summary", children=[
+                html.Div("—", className="rec-empty"),
+            ]),
+        ]),
+
+        # Tabla recibo con sistema
+        html.Div(className="card col-12 row-gap-14", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Recibo mensual detallado · con sistema",
+                            className="card-title"),
+                    html.P("Demanda, factor de potencia y total CFE estimado por mes",
+                           className="card-sub"),
+                ]),
+            ]),
+            html.Div(id="fin-table-sis", className="fin-table-wrap", children=[
+                html.Div("Ejecuta el análisis para ver el detalle.",
+                         className="rec-empty"),
+            ]),
+        ]),
+    ]),
+
+    html.Footer(className="app-footer", children=[
+        html.Span("KARDASHEV-I · BUILD 0.2.0"),
+        html.Span("CFE GDMTH · AUTOCONSUMO"),
+    ]),
+])
+
+
 # ───────────────────────── Layout ──────────────────────────────────────────────
 app.layout = html.Div([
+    dcc.Location(id="url"),
     dcc.Store(id="store-df"),
+    dcc.Store(id="store-meta"),
+    dcc.Store(id="store-demand"),
     dcc.Store(id="dummy-landing"),
     dcc.Store(id="dummy-tilt"),
     dcc.Store(id="dummy-az"),
@@ -751,7 +1086,10 @@ app.layout = html.Div([
     landing,
     html.Div(id="app", children=[
         topbar,
-        html.Div(className="shell", children=[sidebar, main]),
+        html.Div(id="page-sim", children=[
+            html.Div(className="shell", children=[sidebar, main]),
+        ]),
+        html.Div(id="page-fin", style={"display": "none"}, children=[finance_page]),
     ]),
 ])
 
@@ -968,6 +1306,7 @@ def sync_landing_meta(lat, lon, tz):
     Output("ms-min", "children"),
     Output("ms-avg", "children"),
     Output("store-df", "data"),
+    Output("store-meta", "data"),
     Output("error-alert", "className"),
     Output("error-msg", "children"),
     Output("page-sub", "children"),
@@ -1042,18 +1381,21 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         page_sub = (f"{n} paneles · {total_area:.1f} m² · η {eff} · PR {pr} "
                     f"a {lat:.2f}°, {lon:.2f}°.")
 
+        store_meta = {"num_paneles": n, "area": float(area),
+                      "total_area": total_area}
+
         return (kpi_energia, kpi_pico, kpi_cf, kpi_mes,
                 foot_energia, foot_pico, foot_cf, foot_mes,
                 fig_ts, fig_mo,
                 ms_peak, ms_min, ms_avg,
-                store_json, "alert hidden", "", page_sub)
+                store_json, store_meta, "alert hidden", "", page_sub)
 
     except Exception as exc:
         return ("—", "—", "—", "—",
                 "", "", "", "",
                 blank, blank,
                 "—", "—", "—",
-                None, "alert", str(exc),
+                None, None, "alert", str(exc),
                 "Ejecuta el cálculo para ver los resultados.")
 
 
@@ -1162,6 +1504,179 @@ def download_csv(_, stored, fp_val):
         "Energia_kVArh": e_kvarh.values,
     })
     return dcc.send_data_frame(df_out.to_csv, "kardashev_15min.csv", index=False)
+
+
+# ───────────────────────── Routing ─────────────────────────────────────────────
+@callback(
+    Output("page-sim", "style"),
+    Output("page-fin", "style"),
+    Output("nav-sim", "className"),
+    Output("nav-fin", "className"),
+    Input("url", "pathname"),
+)
+def route(pathname):
+    is_fin = bool(pathname) and pathname.rstrip("/").endswith("finanzas")
+    if is_fin:
+        return ({"display": "none"}, {"display": "block"},
+                "nav-link", "nav-link active")
+    return ({"display": "block"}, {"display": "none"},
+            "nav-link active", "nav-link")
+
+
+# ───────────────────────── Finance: upload demand ──────────────────────────────
+@callback(
+    Output("store-demand", "data"),
+    Output("fin-upload-status", "children"),
+    Output("fin-upload-status", "className"),
+    Input("upload-demanda", "contents"),
+    State("upload-demanda", "filename"),
+    prevent_initial_call=True,
+)
+def parse_demand(contents, filename):
+    if not contents:
+        return no_update, no_update, no_update
+    try:
+        _, content_string = contents.split(",", 1)
+        decoded = base64.b64decode(content_string)
+        df = pd.read_csv(StringIO(decoded.decode("utf-8")),
+                         index_col=0, parse_dates=True)
+        faltantes = [c for c in ("Energia_kWh", "Energia_kVArh")
+                     if c not in df.columns]
+        if faltantes:
+            raise ValueError(f"Faltan columnas: {', '.join(faltantes)}.")
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise ValueError("La primera columna debe ser la fecha/hora.")
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        df = df[["Energia_kWh", "Energia_kVArh"]]
+        store = df.to_json(orient="split", date_format="iso")
+        n = len(df)
+        msg = f"✓ {filename} · {n:,} registros cargados"
+        return store, msg, "fin-up-status ok"
+    except Exception as exc:
+        return None, f"✕ No se pudo leer el archivo: {exc}", "fin-up-status err"
+
+
+# ───────────────────────── Finance: run analysis ───────────────────────────────
+@callback(
+    Output("kpi-roi", "children"),
+    Output("kpi-payback", "children"),
+    Output("kpi-npv", "children"),
+    Output("kpi-ahorro", "children"),
+    Output("kpi-curtail", "children"),
+    Output("kpi-roi-foot", "children"),
+    Output("kpi-payback-foot", "children"),
+    Output("kpi-npv-foot", "children"),
+    Output("kpi-ahorro-foot", "children"),
+    Output("kpi-curtail-foot", "children"),
+    Output("fin-graph-bill", "figure"),
+    Output("fin-graph-curtail", "figure"),
+    Output("fin-graph-energy", "figure"),
+    Output("fin-recommendations", "children"),
+    Output("fin-capex-summary", "children"),
+    Output("fin-table-sis", "children"),
+    Output("fin-error-alert", "className"),
+    Output("fin-error-msg", "children"),
+    Input("btn-fin-run", "n_clicks"),
+    State("store-df", "data"),
+    State("store-meta", "data"),
+    State("store-demand", "data"),
+    State("inp-costo-panel", "value"),
+    State("inp-costo-pila", "value"),
+    State("inp-num-apagones", "value"),
+    State("inp-dur-apagon", "value"),
+    State("inp-cap-respaldo", "value"),
+    prevent_initial_call=True,
+)
+def run_financial(_, store_df, store_meta, store_demand,
+                  costo_panel, costo_pila, num_apagones, dur_apagon, cap_respaldo):
+    blank = empty_fig()
+    dash_vals = ["—"] * 5
+    foots = [""] * 5
+    empty_recs = [html.Div("Ejecuta el análisis.", className="rec-empty")]
+    empty_summary = [html.Div("—", className="rec-empty")]
+    empty_table = [html.Div("Sin datos.", className="rec-empty")]
+
+    def err(msg):
+        return (*dash_vals, *foots, blank, blank, blank,
+                empty_recs, empty_summary, empty_table, "alert", msg)
+
+    try:
+        if not store_df or not store_meta:
+            raise ValueError(
+                "Primero corre el Simulador FV para calcular la generación solar.")
+        if not store_demand:
+            raise ValueError("Sube un CSV de demanda válido.")
+
+        df_solar = pd.read_json(StringIO(store_df), orient="split")
+        df_solar.index = pd.to_datetime(df_solar.index)
+        df_dem = pd.read_json(StringIO(store_demand), orient="split")
+        df_dem.index = pd.to_datetime(df_dem.index)
+
+        num_paneles = int(store_meta.get("num_paneles", 1))
+        area = float(store_meta.get("area", 1.0))
+
+        res = simular_financiero(
+            df_solar=df_solar, df_demanda=df_dem,
+            num_paneles=num_paneles, area=area,
+            costo_panel_m2=float(costo_panel or 0),
+            costo_pila=float(costo_pila or 0),
+            cap_respaldo_max_kwh=float(cap_respaldo or 0),
+            num_apagones=int(num_apagones or 0),
+            duracion_horas_apagon=float(dur_apagon or 1.0),
+        )
+
+        # KPIs
+        payback = res["payback_anios"]
+        payback_txt = ("∞" if payback == float("inf")
+                       else [f"{payback:.1f}", html.Span("años", className="u")])
+        kpi_roi = [f"{res['roi_pct']:.0f}", html.Span("%", className="u")]
+        kpi_npv = [f"${res['npv']/1000:,.0f}", html.Span("k MXN", className="u")]
+        kpi_ahorro = [f"${res['ahorro_anual']/1000:,.0f}",
+                      html.Span("k MXN/año", className="u")]
+        kpi_curtail = [f"{res['pct_desperdicio']:.1f}", html.Span("%", className="u")]
+
+        foot_roi = f"horizonte {HORIZONTE_ANIOS} años"
+        foot_payback = ("no se recupera" if payback == float("inf")
+                        else "recuperación simple")
+        foot_npv = "valor presente neto"
+        foot_ahorro = f"${res['ahorro_anual']:,.0f} MXN"
+        foot_curtail = f"{res['total_desperdiciada']:,.0f} kWh · ${res['dinero_tirado']:,.0f}"
+
+        # Figures
+        fig_bill = build_bill_compare_fig(res["df_recibo_sis"], res["df_recibo_base"])
+        fig_curtail = build_curtail_fig(res["df_energia_mensual"])
+        fig_energy = build_energy_month_fig(res["df_energia_mensual"])
+
+        recs = build_recommendations(res["recomendaciones"])
+
+        summary = html.Div(className="fin-summary-grid", children=[
+            _summ_row("Paneles", f"{num_paneles} uds · {num_paneles*area:.1f} m²"),
+            _summ_row("Costo paneles", f"${res['costo_total_paneles']:,.0f}"),
+            _summ_row("Banco diario", f"{res['sizing_diario_requerido']:,.0f} kWh"),
+            _summ_row("Pilas", f"{res['cant_pilas']} uds"),
+            _summ_row("Costo pilas", f"${res['costo_total_pilas']:,.0f}"),
+            _summ_row("CapEx total", f"${res['capex']:,.0f}", strong=True),
+            _summ_row("Solar generada", f"{res['total_generada']:,.0f} kWh/año"),
+        ])
+
+        table = build_recibo_table(res["df_recibo_sis"])
+
+        return (kpi_roi, payback_txt, kpi_npv, kpi_ahorro, kpi_curtail,
+                foot_roi, foot_payback, foot_npv, foot_ahorro, foot_curtail,
+                fig_bill, fig_curtail, fig_energy,
+                recs, summary, table, "alert hidden", "")
+
+    except Exception as exc:
+        return err(str(exc))
+
+
+def _summ_row(label, value, strong=False):
+    return html.Div(className="fin-summary-row" + (" strong" if strong else ""),
+                    children=[
+                        html.Span(label, className="fs-lbl"),
+                        html.Span(value, className="fs-val"),
+                    ])
 
 
 if __name__ == "__main__":
