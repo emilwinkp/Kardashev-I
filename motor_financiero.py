@@ -22,7 +22,7 @@ CARGO_DISTRIBUCION = 100.00   # MXN por kW de demanda máxima
 
 # Parámetros financieros fijos (modelo de simulacion_1.py)
 # Factor de valor presente de los ahorros a lo largo del horizonte del proyecto.
-HORIZONTE_ANIOS = 7
+HORIZONTE_ANIOS = 10
 _FACTOR_VP_AHORROS = (
     HORIZONTE_ANIOS * ((1 + 0.0426) ** 6 / (1 + 0.007) ** 6) / (1 + 0.0411) ** 7
 )
@@ -116,13 +116,22 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
 
     df['periodo_cfe'] = df.index.map(asignar_tarifa_gdmth)
 
-    # ── Dimensionar el banco diario por el peor día de consumo en Punta ──
+    # ── Dimensionar el banco unificando consumo Punta + respaldo de apagones ──
+    # El banco se dimensiona por el mayor de tres requisitos:
+    #   1) sizing_punta:    peor día de consumo en horario Punta (kWh)
+    #   2) energia_apagon:  energía para sostener la demanda pico durante un apagón
+    #                       (potencia pico [kW] × duración del apagón [h])
+    #   3) cap_respaldo:    capacidad de respaldo configurada por el usuario
+    # Nota: el NÚMERO de apagones no dimensiona la batería (un solo evento manda);
+    #       sí afecta la operación y por tanto el ahorro.
     df_punta = df[df['periodo_cfe'] == 'Punta']
     consumo_punta_por_dia = df_punta.groupby(df_punta.index.date)['Energia_kWh'].sum()
-    if len(consumo_punta_por_dia) > 0:
-        sizing_diario_requerido = consumo_punta_por_dia.max()
-    else:
-        sizing_diario_requerido = 1000
+    sizing_punta = consumo_punta_por_dia.max() if len(consumo_punta_por_dia) > 0 else 1000
+
+    demanda_pico_kw = df['Energia_kWh'].max() * 4   # kWh/15min → kW
+    energia_apagon = demanda_pico_kw * duracion_horas_apagon
+
+    sizing_diario_requerido = max(sizing_punta, energia_apagon, cap_respaldo_max_kwh)
     cap_diaria_virtual_max = sizing_diario_requerido
 
     # ── Estado inicial de baterías ──

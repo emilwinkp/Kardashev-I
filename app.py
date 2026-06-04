@@ -240,7 +240,18 @@ def build_irradiance_fig(sample, sample2=None):
         ann_text += f"&nbsp;&nbsp;&nbsp;╌╌╌ {r2}"
 
     fig.update_layout(**_base_layout())
-    fig.update_layout(showlegend=False)
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom", y=1.02,
+            xanchor="left", x=0,
+            font=dict(size=10, color=TEXT, family=FONT_FAMILY),
+            bgcolor="rgba(0,0,0,0)",
+            itemclick="toggle", itemdoubleclick="toggleothers",
+        ),
+        margin=dict(l=50, r=10, t=34, b=30),
+    )
     fig.update_layout(**_axes(" W/m²"))
     fig.update_layout(hovermode="x unified")
     fig.add_annotation(
@@ -752,26 +763,8 @@ main = html.Main(className="main", children=[
                     html.P("W/m² sobre el rango seleccionado",
                            className="card-sub"),
                 ]),
-                html.Div(className="legend", children=[
-                    html.Span([
-                        html.Span(className="swatch",
-                                  style={"background": INFO}), "GHI ①",
-                    ]),
-                    html.Span([
-                        html.Span(className="swatch",
-                                  style={"background": ACCENT}), "POA ①",
-                    ]),
-                    html.Span([
-                        html.Span(className="swatch",
-                                  style={"background": INFO_CMP,
-                                         "opacity": "0.7"}), "GHI ②",
-                    ]),
-                    html.Span([
-                        html.Span(className="swatch",
-                                  style={"background": ACCENT_CMP,
-                                         "opacity": "0.7"}), "POA ②",
-                    ]),
-                ]),
+                html.Div(className="legend-hint",
+                         children="Clic en la leyenda para mostrar/ocultar · doble clic para aislar"),
             ]),
             html.Div(className="chart-wrap", children=[
                 dcc.Graph(id="graph-irradiance",
