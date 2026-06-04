@@ -45,6 +45,8 @@ df.loc[~es_verano & (df.index.hour >= 0) & (df.index.hour < 6), 'Periodo'] = 'Ba
 # Punta: 18:00 a 22:00
 df.loc[~es_verano & (df.index.hour >= 18) & (df.index.hour < 22), 'Periodo'] = 'Punta'
 
+#print(df.loc[df['Periodo'] == 'Punta'].head(24))
+
 recibo_mensual = []
 
 for (año,mes),grupo in df.groupby([df.index.year, df.index.month]):
@@ -57,6 +59,7 @@ for (año,mes),grupo in df.groupby([df.index.year, df.index.month]):
     kwh_intermedio = grupo.loc[grupo['Periodo'] == 'Intermedio', 'Energia_kWh'].sum()
     kwh_punta = grupo.loc[grupo['Periodo'] == 'Punta', 'Energia_kWh'].sum()
     
+    print(f"{mes}: {grupo.loc[grupo['Periodo'] == 'Punta', 'Demanda_kW'].max()} kW")
     
     # === Capacidad y distribución ===
     
@@ -104,13 +107,12 @@ for (año,mes),grupo in df.groupby([df.index.year, df.index.month]):
     }
     
     recibo_mensual.append(datos)
-    
 
 recibo_df = pd.DataFrame(recibo_mensual)
 
-#recibo_df.to_csv('recibo.csv', index=False)
+#recibo_df.to_csv('recibo_riojas.csv', index=False)
 
-    
+
     
     
     
