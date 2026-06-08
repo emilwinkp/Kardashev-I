@@ -4,7 +4,10 @@ Replica visualmente design.html sobre la lógica de Dash + motor_2.py.
 NOTA: motor_2.py es intocable.
 """
 import base64
+import datetime
+import json
 from io import StringIO
+from zoneinfo import ZoneInfo
 
 import dash
 from dash import (Input, Output, State, callback, clientside_callback, dcc,
@@ -13,13 +16,35 @@ import dash_leaflet as dl
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from timezonefinder import TimezoneFinder
 
 from motor_2 import calculate
+from motor_fisica_avanzada import calculate_advanced
 from motor_financiero import HORIZONTE_ANIOS, simular_financiero
+import perfil_demanda
+import tarifas_cfe
+from geo_utils import fetch_altitude
 
 _tf = TimezoneFinder()
+
+
+def _tz_para_motor(iana_name: str) -> str:
+    """Si el timezone tiene DST, convierte a offset fijo Etc/GMT±X para evitar
+    errores de timestamps ambiguos/inexistentes en pd.date_range + pvlib."""
+    try:
+        tz = ZoneInfo(iana_name)
+        summer = datetime.datetime(2026, 7, 15, tzinfo=tz).utcoffset()
+        winter = datetime.datetime(2026, 1, 15, tzinfo=tz).utcoffset()
+        if summer == winter:
+            return iana_name  # Sin DST, se usa directo
+        offset_h = round(winter.total_seconds() / 3600)
+        if offset_h == 0:
+            return "UTC"
+        return f"Etc/GMT{-offset_h:+d}"  # Etc/GMT invierte el signo (POSIX)
+    except Exception:
+        return iana_name
 
 
 # ───────────────────────── Constantes ──────────────────────────────────────────
@@ -54,12 +79,36 @@ N_PANELS_DEFAULT = 20   # número de paneles → total 42 m²
 EFF_DEFAULT = 0.21
 PR_DEFAULT = 0.82
 
+# Defaults de física avanzada (Modo Avanzado). En UI se usan unidades amables
+# (%/°C, %, ...) y se convierten a fracción 1/°C al llamar al motor.
+TAMB_DEFAULT = 25       # °C ambiente (anual)
+GAMMA_DEFAULT = -0.40   # %/°C (coef. de temperatura γ_Pmax)
+NOCT_DEFAULT = 45       # °C
+SOILING_DEFAULT = 3     # % pérdidas por suciedad
+WIRING_DEFAULT = 2      # % pérdidas en cableado (DC+AC)
+ETA_INV_DEFAULT = 97    # % eficiencia del inversor
+DEGR_DEFAULT = 0.5      # %/año degradación
+
+# Consumo (Modo Simple)
+KWH_DIA_DEFAULT = 15    # kWh/día
+RECIBO_MES_DEFAULT = 1500  # MXN/mes
+TARIFA_DEFAULT = "DAC"
+
 # Defaults financieros (editables en la página de análisis)
 COSTO_PANEL_M2_DEFAULT = 1000     # MXN / m²
 COSTO_PILA_DEFAULT = 500000       # MXN / pila (100 kWh)
-NUM_APAGONES_DEFAULT = 30
+NUM_APAGONES_DEFAULT = 10
 DUR_APAGON_DEFAULT = 1.5          # horas
-CAP_RESPALDO_DEFAULT = 500        # kWh
+CAP_RESPALDO_DEFAULT = 100        # kWh
+
+# Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
+PRECIO_BASE_DEFAULT = 1.10        # MXN/kWh
+PRECIO_INT_DEFAULT = 1.50         # MXN/kWh
+PRECIO_PUNTA_DEFAULT = 3.20       # MXN/kWh
+CARGO_CAP_DEFAULT = 350           # MXN/kW (capacidad/punta)
+CARGO_DIST_DEFAULT = 100          # MXN/kW (distribución)
+INFLACION_DEFAULT = 4.26          # %/año (crecimiento del ahorro)
+DESCUENTO_DEFAULT = 4.11          # %/año (tasa de descuento)
 
 SUCCESS = "#22c55e"
 
@@ -286,6 +335,112 @@ def build_energy_15min_fig(sample):
     return fig
 
 
+# ───────────────────────── Advanced figures ────────────────────────────────────
+def build_decomp_fig(sample):
+    """4 paneles GHI/DNI/DHI/POA (W/m²) + elevación solar sobre GHI."""
+    fig = make_subplots(
+        rows=2, cols=2,
+        specs=[[{"secondary_y": True}, {}], [{}, {}]],
+        subplot_titles=("GHI + elevación solar", "DNI (haz directo)",
+                        "DHI (difusa)", "POA / Gtot (plano del panel)"),
+        horizontal_spacing=0.10, vertical_spacing=0.20,
+    )
+    x = sample.index
+    # GHI + elevación solar (eje secundario)
+    fig.add_trace(go.Scatter(x=x, y=sample["ghi"], mode="lines", name="GHI",
+                             line=dict(color=ACCENT, width=1.3),
+                             hovertemplate="GHI %{y:.0f} W/m²<extra></extra>"),
+                  row=1, col=1, secondary_y=False)
+    if "solar_elevation" in sample.columns:
+        elev = sample["solar_elevation"].clip(lower=0)
+        fig.add_trace(go.Scatter(x=x, y=elev, mode="lines", name="Elev. solar",
+                                 line=dict(color=INFO, width=1, dash="dot"),
+                                 hovertemplate="Elev %{y:.0f}°<extra></extra>"),
+                      row=1, col=1, secondary_y=True)
+    fig.add_trace(go.Scatter(x=x, y=sample["dni"], mode="lines", name="DNI",
+                             line=dict(color=ACCENT_CMP, width=1.3),
+                             hovertemplate="DNI %{y:.0f} W/m²<extra></extra>"),
+                  row=1, col=2)
+    fig.add_trace(go.Scatter(x=x, y=sample["dhi"], mode="lines", name="DHI",
+                             line=dict(color=INFO_CMP, width=1.3),
+                             hovertemplate="DHI %{y:.0f} W/m²<extra></extra>"),
+                  row=2, col=1)
+    fig.add_trace(go.Scatter(x=x, y=sample["poa_global"], mode="lines", name="POA",
+                             line=dict(color=SUCCESS, width=1.3),
+                             hovertemplate="POA %{y:.0f} W/m²<extra></extra>"),
+                  row=2, col=2)
+    fig.update_layout(**_base_layout(margin_l=45, margin_b=30))
+    fig.update_layout(showlegend=False)
+    fig.update_xaxes(showgrid=False, linecolor="#1a1a1a", tickcolor=TICK,
+                     zeroline=False, type="date")
+    fig.update_yaxes(gridcolor=GRID, showgrid=True, linecolor="#1a1a1a",
+                     tickcolor=TICK, zeroline=False)
+    fig.update_yaxes(title_text="W/m²", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="°", row=1, col=1, secondary_y=True,
+                     showgrid=False, range=[0, 90])
+    fig.for_each_annotation(lambda a: a.update(font=dict(size=12.5, color=TEXT)))
+    return fig
+
+
+def build_waterfall_fig(p):
+    """Cascada de pérdidas: nominal → pérdidas → energía neta (kWh/año)."""
+    etapas = [
+        ("Nominal (STC)", "relative", p.get("nominal", 0)),
+        ("Temperatura", "relative", -p.get("temperatura", 0)),
+        ("Suciedad", "relative", -p.get("suciedad", 0)),
+        ("IAM", "relative", -p.get("iam", 0)),
+        ("Cableado", "relative", -p.get("cableado", 0)),
+        ("Inversor", "relative", -p.get("inversor", 0)),
+        ("Otras (PR)", "relative", -p.get("otras_pr", 0)),
+        ("Degradación", "relative", -p.get("degradacion", 0)),
+        ("Neto", "total", 0),
+    ]
+    fig = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=[e[1] for e in etapas],
+        x=[e[0] for e in etapas],
+        y=[e[2] for e in etapas],
+        connector=dict(line=dict(color="#333", width=1)),
+        increasing=dict(marker=dict(color=ACCENT)),
+        decreasing=dict(marker=dict(color=DANGER)),
+        totals=dict(marker=dict(color=SUCCESS)),
+        hovertemplate="%{x}<br>%{y:,.0f} kWh<extra></extra>",
+    ))
+    fig.update_layout(**_base_layout(margin_l=55, margin_b=70))
+    fig.update_layout(**_axes(" kWh"))
+    fig.update_xaxes(tickangle=-40)
+    return fig
+
+
+def build_payback_fig(df_flujo):
+    """Flujo de caja descontado acumulado año a año (VPN al cierre).
+
+    Barras rojas mientras la inversión no se recupera, verdes una vez que el
+    acumulado cruza a positivo. La línea sigue el valor presente neto acumulado.
+    """
+    anios = df_flujo["Anio"].tolist()
+    acum = df_flujo["Acumulado_MXN"].tolist()
+    x = [f"Año {a}" for a in anios]
+    colors = [SUCCESS if v >= 0 else DANGER for v in acum]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x, y=acum, marker=dict(color=colors),
+        hovertemplate="<b>%{x}</b><br>Acumulado: $%{y:,.0f}<extra></extra>",
+        name="VPN acumulado",
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=acum, mode="lines+markers",
+        line=dict(color=ACCENT, width=1.6),
+        marker=dict(size=5, color=ACCENT),
+        hoverinfo="skip", name="Tendencia",
+    ))
+    fig.add_hline(y=0, line=dict(color=TICK, width=1, dash="dot"))
+    fig.update_layout(**_base_layout(margin_l=60, margin_b=40))
+    fig.update_layout(**_axes())
+    fig.update_yaxes(tickprefix="$")
+    return fig
+
+
 # ───────────────────────── Finance figures ─────────────────────────────────────
 def build_bill_compare_fig(df_sis, df_base):
     """Recibo CFE mensual: base (sin sistema) vs con sistema FV."""
@@ -448,6 +603,11 @@ topbar = html.Header(className="topbar", children=[
             html.Span(className="dot"),
             "JENSEN · ACTIVO",
         ]),
+        html.Button(id="btn-mode", className="mode-btn", n_clicks=0, children=[
+            html.Span("⚙", className="mode-gear"),
+            html.Span("Modo Avanzado", id="mode-label"),
+            html.Span("", id="mode-badge", className="mode-badge hidden"),
+        ]),
     ]),
 ])
 
@@ -505,8 +665,8 @@ sidebar = html.Aside(className="sidebar", children=[
                       className="input", readOnly=True,
                       style={"opacity": "0.6", "cursor": "default"}),
         ]),
-        html.Div(className="field", children=[
-            html.Label(["Altitud ", html.Span("msnm", className="hint")]),
+        html.Div(className="field adv-only", children=[
+            html.Label(["Altitud ", html.Span("msnm · auto", className="hint")]),
             dcc.Input(id="inp-alt", type="number", value=ALT_DEFAULT,
                       step=1, min=0, max=8848, className="input", debounce=True),
         ]),
@@ -597,7 +757,7 @@ sidebar = html.Aside(className="sidebar", children=[
         ]),
         html.Div(id="total-area-display", className="total-area-display",
                  children=f"Área total: {N_PANELS_DEFAULT * AREA_DEFAULT:.1f} m²"),
-        html.Div(className="field-row", children=[
+        html.Div(className="field-row adv-only", children=[
             html.Div(className="field", children=[
                 html.Label(["Eficiencia η (Realistic ~ 0.15-0.22) ",
                             html.Span("0–1", className="hint")]),
@@ -613,12 +773,114 @@ sidebar = html.Aside(className="sidebar", children=[
                           debounce=True),
             ]),
         ]),
-        html.Div(className="field", children=[
+        html.Div(className="field adv-only", children=[
             html.Label(["Factor de potencia ",
                         html.Span("cos φ", className="hint")]),
             dcc.Input(id="inp-fp", type="number", value=1.0,
                       step=0.01, min=0.01, max=1.0, className="input",
                       debounce=True),
+        ]),
+    ]),
+
+    # 4 — Física avanzada (solo Modo Avanzado)
+    html.Div(className="section adv-only", children=[
+        html.Div(className="section-head", children=[
+            html.H3("Física avanzada"),
+            html.Span("04", className="num"),
+        ]),
+        html.Div(className="info-box", children=[
+            html.P([
+                html.Strong("¿Qué hace este modo? "),
+                "Sustituye el factor de pérdidas global (PR) por un modelo de "
+                "pérdidas físicas explícito y trazable, paso a paso:",
+            ]),
+            html.Ul(className="info-list", children=[
+                html.Li([html.B("Temperatura: "),
+                         "estima la temperatura de celda con el modelo NOCT "
+                         "(Tcell = Tamb + (NOCT−20)·POA/800) y corrige la "
+                         "eficiencia con el coeficiente γ_Pmax. Un panel caliente "
+                         "genera menos."]),
+                html.Li([html.B("Suciedad: "),
+                         "polvo y mugre sobre el vidrio (2–5% típico)."]),
+                html.Li([html.B("IAM: "),
+                         "pérdidas por reflexión al incidir la luz en ángulo "
+                         "(modelo Martin-Ruiz, opcional)."]),
+                html.Li([html.B("Cableado e inversor: "),
+                         "pérdidas óhmicas DC+AC y la eficiencia del inversor."]),
+                html.Li([html.B("Degradación: "),
+                         "envejecimiento del módulo (%/año) según el año que "
+                         "proyectes."]),
+            ]),
+            html.P([
+                html.Strong("¿Por qué? "),
+                "El PR único oculta de dónde vienen las pérdidas. Al separarlas "
+                "obtienes una estimación más realista y la cascada de pérdidas "
+                "te dice exactamente cuánta energía pierde cada efecto.",
+            ], className="info-foot"),
+        ]),
+        html.Div(className="field-row", children=[
+            html.Div(className="field", children=[
+                html.Label(["Temp. ambiente ",
+                            html.Span("°C", className="hint")]),
+                dcc.Input(id="inp-tamb", type="number", value=TAMB_DEFAULT,
+                          step=1, className="input", debounce=True),
+            ]),
+            html.Div(className="field", children=[
+                html.Label(["Coef. γ_Pmax ",
+                            html.Span("%/°C", className="hint")]),
+                dcc.Input(id="inp-gamma", type="number", value=GAMMA_DEFAULT,
+                          step="any", className="input", debounce=True),
+            ]),
+        ]),
+        html.Div(className="field-row", children=[
+            html.Div(className="field", children=[
+                html.Label(["NOCT ", html.Span("°C", className="hint")]),
+                dcc.Input(id="inp-noct", type="number", value=NOCT_DEFAULT,
+                          step=1, className="input", debounce=True),
+            ]),
+            html.Div(className="field", children=[
+                html.Label(["Suciedad ", html.Span("%", className="hint")]),
+                dcc.Input(id="inp-soiling", type="number", value=SOILING_DEFAULT,
+                          step="any", min=0, max=30, className="input",
+                          debounce=True),
+            ]),
+        ]),
+        html.Div(className="field-row", children=[
+            html.Div(className="field", children=[
+                html.Label(["Cableado ", html.Span("%", className="hint")]),
+                dcc.Input(id="inp-wiring", type="number", value=WIRING_DEFAULT,
+                          step="any", min=0, max=15, className="input",
+                          debounce=True),
+            ]),
+            html.Div(className="field", children=[
+                html.Label(["Eficiencia inversor ",
+                            html.Span("%", className="hint")]),
+                dcc.Input(id="inp-eta-inv", type="number", value=ETA_INV_DEFAULT,
+                          step="any", min=50, max=100, className="input",
+                          debounce=True),
+            ]),
+        ]),
+        html.Div(className="field-row", children=[
+            html.Div(className="field", children=[
+                html.Label(["Degradación ", html.Span("%/año", className="hint")]),
+                dcc.Input(id="inp-degr", type="number", value=DEGR_DEFAULT,
+                          step="any", min=0, max=5, className="input",
+                          debounce=True),
+            ]),
+            html.Div(className="field", children=[
+                html.Label(["Año proyección ", html.Span("0–25", className="hint")]),
+                dcc.Input(id="inp-year-idx", type="number", value=0,
+                          step=1, min=0, max=25, className="input",
+                          debounce=True),
+            ]),
+        ]),
+        html.Div(className="field", children=[
+            dcc.Checklist(
+                id="chk-iam", className="chk-row",
+                options=[{"label": " Aplicar IAM (ángulo de incidencia)",
+                          "value": "iam"}],
+                value=[],
+            ),
         ]),
     ]),
 
@@ -835,6 +1097,44 @@ main = html.Main(className="main", children=[
                 ),
             ]),
         ]),
+
+        # Descomposición de irradiancia (solo Modo Avanzado)
+        html.Div(className="card col-12 row-gap-14 adv-only", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Descomposición de irradiancia",
+                            className="card-title"),
+                    html.P("GHI · DNI · DHI · POA (W/m²) — rango compartido con "
+                           "la gráfica de irradiancia · elevación solar "
+                           "superpuesta en GHI",
+                           className="card-sub"),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="graph-decomp",
+                          figure=empty_fig("Ejecuta el cálculo en Modo Avanzado"),
+                          config={"displayModeBar": False},
+                          style={"height": "560px", "width": "100%"}),
+            ]),
+        ]),
+
+        # Cascada de pérdidas (solo Modo Avanzado)
+        html.Div(className="card col-12 row-gap-14 adv-only", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Cascada de pérdidas del sistema",
+                            className="card-title"),
+                    html.P("De energía nominal (STC) a energía neta (kWh/año)",
+                           className="card-sub"),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="graph-waterfall",
+                          figure=empty_fig("Ejecuta el cálculo en Modo Avanzado"),
+                          config={"displayModeBar": False},
+                          style={"height": "420px", "width": "100%"}),
+            ]),
+        ]),
     ]),
 
     html.Footer(className="app-footer", children=[
@@ -904,6 +1204,48 @@ finance_page = html.Main(className="main", children=[
             ),
             html.Div(id="fin-upload-status", className="fin-up-status"),
 
+            # ── Alternativa sin CSV: tarifa + perfil sintético de demanda ──
+            html.Div(className="fin-divider", children="o estima tu demanda"),
+            html.Div(className="fin-tarifa", children=[
+                html.Div(className="field", children=[
+                    html.Label(["Tarifa CFE ",
+                                html.Span("", id="tarifa-fecha", className="hint")]),
+                    dcc.Dropdown(
+                        id="dd-tarifa", className="dd-tarifa",
+                        options=tarifas_cfe.opciones_dropdown(),
+                        value=TARIFA_DEFAULT, clearable=False,
+                    ),
+                    html.P("", id="tarifa-desc", className="tarifa-desc"),
+                ]),
+                html.Div(className="field", children=[
+                    dcc.RadioItems(
+                        id="consumo-modo", className="radio-row",
+                        options=[
+                            {"label": " kWh / día", "value": "kwh"},
+                            {"label": " Recibo MXN / mes", "value": "recibo"},
+                        ],
+                        value="kwh", inline=True,
+                    ),
+                ]),
+                html.Div(className="field", children=[
+                    html.Div(id="wrap-kwh", children=[
+                        html.Label(["Consumo diario ",
+                                    html.Span("kWh/día", className="hint")]),
+                        dcc.Input(id="inp-kwh-dia", type="number",
+                                  value=KWH_DIA_DEFAULT, step="any", min=0.1,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(id="wrap-recibo", style={"display": "none"}, children=[
+                        html.Label(["Recibo mensual ",
+                                    html.Span("MXN/mes", className="hint")]),
+                        dcc.Input(id="inp-recibo-mes", type="number",
+                                  value=RECIBO_MES_DEFAULT, step="any", min=1,
+                                  className="input", debounce=True),
+                    ]),
+                ]),
+                html.Div(id="consumo-status", className="consumo-status"),
+            ]),
+
             html.Div(className="fin-inputs", children=[
                 html.Div(className="field", children=[
                     html.Label(["Costo panel ", html.Span("MXN/m²", className="hint")]),
@@ -936,6 +1278,71 @@ finance_page = html.Main(className="main", children=[
                               className="input", debounce=True),
                 ]),
             ]),
+
+            # ── Tarifa GDMTH manual + finanzas avanzadas (solo Modo Avanzado) ──
+            html.Div(className="adv-only", children=[
+                html.Div(className="fin-divider",
+                         children="tarifa CFE GDMTH personalizada"),
+                html.Div(className="info-box info-box--sm", children=[
+                    "Ajusta los precios por horario de la tarifa GDMTH y los "
+                    "supuestos financieros. El VPN se calcula como una anualidad "
+                    "creciente: el ahorro sube con la inflación y se descuenta a "
+                    "la tasa indicada a lo largo del horizonte de "
+                    f"{HORIZONTE_ANIOS} años.",
+                ]),
+                html.Div(className="fin-inputs", children=[
+                    html.Div(className="field", children=[
+                        html.Label(["Precio Base ",
+                                    html.Span("MXN/kWh", className="hint")]),
+                        dcc.Input(id="inp-precio-base", type="number",
+                                  value=PRECIO_BASE_DEFAULT, step="any", min=0,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Precio Intermedio ",
+                                    html.Span("MXN/kWh", className="hint")]),
+                        dcc.Input(id="inp-precio-int", type="number",
+                                  value=PRECIO_INT_DEFAULT, step="any", min=0,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Precio Punta ",
+                                    html.Span("MXN/kWh", className="hint")]),
+                        dcc.Input(id="inp-precio-punta", type="number",
+                                  value=PRECIO_PUNTA_DEFAULT, step="any", min=0,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Cargo capacidad ",
+                                    html.Span("MXN/kW", className="hint")]),
+                        dcc.Input(id="inp-cargo-cap", type="number",
+                                  value=CARGO_CAP_DEFAULT, step="any", min=0,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Cargo distribución ",
+                                    html.Span("MXN/kW", className="hint")]),
+                        dcc.Input(id="inp-cargo-dist", type="number",
+                                  value=CARGO_DIST_DEFAULT, step="any", min=0,
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Inflación energía ",
+                                    html.Span("%/año", className="hint")]),
+                        dcc.Input(id="inp-inflacion", type="number",
+                                  value=INFLACION_DEFAULT, step="any",
+                                  className="input", debounce=True),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Tasa de descuento ",
+                                    html.Span("%/año", className="hint")]),
+                        dcc.Input(id="inp-descuento", type="number",
+                                  value=DESCUENTO_DEFAULT, step="any",
+                                  className="input", debounce=True),
+                    ]),
+                ]),
+            ]),
+
             html.Button(id="btn-fin-run", className="calc-btn", n_clicks=0, children=[
                 svg_img(_ICON_BOLT, 14, 14),
                 html.Span("Ejecutar análisis"),
@@ -1014,6 +1421,33 @@ finance_page = html.Main(className="main", children=[
             ]),
         ]),
 
+        # Recuperación de la inversión (VPN acumulado año a año)
+        html.Div(className="card col-12 row-gap-14", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Recuperación de la inversión · VPN acumulado",
+                            className="card-title"),
+                    html.P("Flujo de caja descontado acumulado por año — cruza a "
+                           "verde en el año de recuperación; el último valor es el VPN",
+                           className="card-sub"),
+                ]),
+                html.Div(className="legend", children=[
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": DANGER}),
+                               "Sin recuperar"]),
+                    html.Span([html.Span(className="swatch",
+                                         style={"background": SUCCESS}),
+                               "Recuperado"]),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                dcc.Graph(id="fin-graph-payback",
+                          figure=empty_fig("Ejecuta el análisis"),
+                          config={"displayModeBar": False},
+                          style={"height": "300px", "width": "100%"}),
+            ]),
+        ]),
+
         # Recomendaciones
         html.Div(className="card col-7 row-gap-14", children=[
             html.Div(className="card-head", children=[
@@ -1072,9 +1506,12 @@ app.layout = html.Div([
     dcc.Store(id="store-df"),
     dcc.Store(id="store-meta"),
     dcc.Store(id="store-demand"),
+    dcc.Store(id="store-losses"),
+    dcc.Store(id="ui-mode", data="simple"),
     dcc.Store(id="dummy-landing"),
     dcc.Store(id="dummy-tilt"),
     dcc.Store(id="dummy-az"),
+    dcc.Store(id="dummy-mode"),
     dcc.Download(id="download-csv"),
     landing,
     html.Div(id="app", children=[
@@ -1247,6 +1684,59 @@ clientside_callback(
 )
 
 
+# Mode toggle: Simple ↔ Avanzado (alterna la clase del body)
+clientside_callback(
+    """
+    function(n) {
+        const adv = (n % 2) === 1;
+        document.body.classList.toggle('mode-advanced', adv);
+        setTimeout(function(){ window.dispatchEvent(new Event('resize')); }, 60);
+        return [adv ? 'avanzado' : 'simple', adv ? 'Modo Simple' : 'Modo Avanzado'];
+    }
+    """,
+    Output("ui-mode", "data"),
+    Output("mode-label", "children"),
+    Input("btn-mode", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+# Badge: marca si algún parámetro avanzado difiere de su valor por defecto
+clientside_callback(
+    """
+    function(eff,pr,fp,tamb,gamma,noct,soil,wire,inv,degr,yr,iam,alt) {
+        const d = {eff:0.21,pr:0.82,fp:1.0,tamb:25,gamma:-0.40,noct:45,
+                   soil:3,wire:2,inv:97,degr:0.5,yr:0,alt:540};
+        let diff = (+eff!==d.eff)||(+pr!==d.pr)||(+fp!==d.fp)||(+tamb!==d.tamb)||
+                   (+gamma!==d.gamma)||(+noct!==d.noct)||(+soil!==d.soil)||
+                   (+wire!==d.wire)||(+inv!==d.inv)||(+degr!==d.degr)||(+yr!==d.yr)||
+                   (+alt!==d.alt);
+        if (iam && iam.length) diff = true;
+        return diff ? 'mode-badge' : 'mode-badge hidden';
+    }
+    """,
+    Output("mode-badge", "className"),
+    Input("inp-eff", "value"), Input("inp-pr", "value"), Input("inp-fp", "value"),
+    Input("inp-tamb", "value"), Input("inp-gamma", "value"), Input("inp-noct", "value"),
+    Input("inp-soiling", "value"), Input("inp-wiring", "value"),
+    Input("inp-eta-inv", "value"), Input("inp-degr", "value"),
+    Input("inp-year-idx", "value"), Input("chk-iam", "value"),
+    Input("inp-alt", "value"),
+)
+
+# Consumo: mostrar el campo correcto (kWh/día vs recibo)
+clientside_callback(
+    """
+    function(modo) {
+        return [ modo === 'kwh' ? {display:'block'} : {display:'none'},
+                 modo === 'recibo' ? {display:'block'} : {display:'none'} ];
+    }
+    """,
+    Output("wrap-kwh", "style"),
+    Output("wrap-recibo", "style"),
+    Input("consumo-modo", "value"),
+)
+
+
 # ───────────────────────── Server callbacks ────────────────────────────────────
 
 @callback(
@@ -1285,6 +1775,79 @@ def sync_landing_meta(lat, lon, tz):
 
 
 @callback(
+    Output("tarifa-desc", "children"),
+    Output("tarifa-fecha", "children"),
+    Input("dd-tarifa", "value"),
+)
+def tarifa_info(tid):
+    t = tarifas_cfe.TARIFAS.get(tid)
+    if not t:
+        return "", ""
+    return t["descripcion"], t.get("actualizado", "")
+
+
+@callback(
+    Output("inp-lat", "value"),
+    Output("inp-lon", "value"),
+    Output("inp-alt", "value"),
+    Input("map", "clickData"),
+    prevent_initial_call=True,
+)
+def map_click(click):
+    """Clic en el mapa → fija lat/lon y consulta la altitud (Open-Elevation).
+
+    Si la API de elevación falla, conserva el valor previo del campo de altitud.
+    """
+    if not click:
+        return no_update, no_update, no_update
+    latlng = click.get("latlng") or {}
+    lat, lon = latlng.get("lat"), latlng.get("lng")
+    if lat is None or lon is None:
+        return no_update, no_update, no_update
+    lat, lon = round(float(lat), 4), round(float(lon), 4)
+    alt = fetch_altitude(lat, lon)
+    return lat, lon, (alt if alt is not None else no_update)
+
+
+@callback(
+    Output("store-demand", "data", allow_duplicate=True),
+    Output("consumo-status", "children"),
+    Output("consumo-status", "className"),
+    Input("consumo-modo", "value"),
+    Input("inp-kwh-dia", "value"),
+    Input("inp-recibo-mes", "value"),
+    Input("dd-tarifa", "value"),
+    prevent_initial_call=True,
+)
+def gen_demand_profile(modo, kwh_dia, recibo, tarifa):
+    """Genera un perfil de demanda sintético (Modo Simple) → store-demand.
+
+    Alimenta el mismo store que usa el análisis financiero, de modo que el
+    usuario no experto no necesita subir un CSV.
+    """
+    try:
+        if modo == "recibo":
+            # Campo aún vacío: no es un error, solo esperamos un valor válido.
+            if recibo is None or recibo == "":
+                return no_update, no_update, no_update
+            # GDMTH no se invierte aquí (usa CSV + motor financiero); para la
+            # estimación simple aproximamos con la estructura horaria HM.
+            tarifa_inv = "HM" if tarifa == "GDMTH" else tarifa
+            kwh = tarifas_cfe.kwh_dia_desde_recibo(recibo, tarifa_inv)
+        else:
+            if kwh_dia is None or kwh_dia == "":
+                return no_update, no_update, no_update
+            kwh = float(kwh_dia)
+        df = perfil_demanda.generar_perfil(kwh, "residencial")
+        store = df.to_json(orient="split", date_format="iso")
+        anual = perfil_demanda.consumo_anual_kwh(df)
+        msg = f"✓ Perfil generado · {kwh:.1f} kWh/día · {anual:,.0f} kWh/año"
+        return store, msg, "consumo-status ok"
+    except Exception as exc:
+        return no_update, f"✕ {exc}", "consumo-status err"
+
+
+@callback(
     Output("kpi-energia", "children"),
     Output("kpi-pico", "children"),
     Output("kpi-cf", "children"),
@@ -1300,6 +1863,7 @@ def sync_landing_meta(lat, lon, tz):
     Output("ms-avg", "children"),
     Output("store-df", "data"),
     Output("store-meta", "data"),
+    Output("store-losses", "data"),
     Output("error-alert", "className"),
     Output("error-msg", "children"),
     Output("page-sub", "children"),
@@ -1314,9 +1878,21 @@ def sync_landing_meta(lat, lon, tz):
     State("inp-area", "value"),
     State("inp-eff", "value"),
     State("inp-pr", "value"),
+    State("ui-mode", "data"),
+    State("inp-tamb", "value"),
+    State("inp-gamma", "value"),
+    State("inp-noct", "value"),
+    State("inp-soiling", "value"),
+    State("inp-wiring", "value"),
+    State("inp-eta-inv", "value"),
+    State("inp-degr", "value"),
+    State("inp-year-idx", "value"),
+    State("chk-iam", "value"),
     prevent_initial_call=True,
 )
-def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr):
+def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr,
+                    ui_mode, tamb, gamma, noct, soiling, wiring, eta_inv,
+                    degr, year_idx, iam):
     blank = empty_fig()
     try:
         if lat is None or lon is None or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
@@ -1330,9 +1906,30 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         n = int(n_panels) if n_panels and n_panels >= 1 else 1
         total_area = n * float(area)
 
-        df = calculate(lat, lon, float(alt), tz or TZ_DEFAULT,
-                       float(tilt), float(azimuth),
-                       total_area, float(eff), float(pr))
+        modo = ui_mode or "simple"
+        tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
+        perdidas = None
+        if modo == "avanzado":
+            df, perdidas = calculate_advanced(
+                lat, lon, float(alt), tz_motor,
+                float(tilt), float(azimuth), total_area, float(eff), float(pr),
+                tamb=float(tamb) if tamb is not None else 25.0,
+                gamma_pmax=(float(gamma) / 100.0) if gamma is not None else -0.0040,
+                noct=float(noct) if noct is not None else 45.0,
+                soiling=(float(soiling) / 100.0) if soiling is not None else 0.03,
+                wiring_loss=(float(wiring) / 100.0) if wiring is not None else 0.02,
+                eta_inv=(float(eta_inv) / 100.0) if eta_inv is not None else 0.97,
+                degradation=(float(degr) / 100.0) if degr is not None else 0.005,
+                year_index=int(year_idx) if year_idx else 0,
+                use_iam=bool(iam),
+            )
+            store_cols = ["ghi", "poa_global", "potencia_generada",
+                          "dni", "dhi", "solar_elevation"]
+        else:
+            df = calculate(lat, lon, float(alt), tz_motor,
+                           float(tilt), float(azimuth),
+                           total_area, float(eff), float(pr))
+            store_cols = ["ghi", "poa_global", "potencia_generada"]
 
         energia_kwh = df["energia_generada_kWh"].sum()
         pico_w = df["potencia_generada"].max()
@@ -1367,12 +1964,14 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         ms_avg = [f"{daily.mean():.1f}",
                   html.Span("kWh/día", className="u")]
 
-        df_store = df[["ghi", "poa_global", "potencia_generada"]].copy()
+        df_store = df[store_cols].copy()
         df_store.index = df_store.index.tz_localize(None)
         store_json = df_store.to_json(orient="split", date_format="iso")
+        losses_json = json.dumps(perdidas) if perdidas is not None else None
 
+        modo_lbl = "avanzado · física detallada" if modo == "avanzado" else "simple"
         page_sub = (f"{n} paneles · {total_area:.1f} m² · η {eff} · PR {pr} "
-                    f"a {lat:.2f}°, {lon:.2f}°.")
+                    f"a {lat:.2f}°, {lon:.2f}° · modo {modo_lbl}.")
 
         store_meta = {"num_paneles": n, "area": float(area),
                       "total_area": total_area}
@@ -1381,14 +1980,14 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
                 foot_energia, foot_pico, foot_cf, foot_mes,
                 fig_ts, fig_mo,
                 ms_peak, ms_min, ms_avg,
-                store_json, store_meta, "alert hidden", "", page_sub)
+                store_json, store_meta, losses_json, "alert hidden", "", page_sub)
 
     except Exception as exc:
         return ("—", "—", "—", "—",
                 "", "", "", "",
                 blank, blank,
                 "—", "—", "—",
-                None, None, "alert", str(exc),
+                None, None, None, "alert", str(exc),
                 "Ejecuta el cálculo para ver los resultados.")
 
 
@@ -1466,6 +2065,48 @@ def update_energy_15min(start, end, stored):
                   className="e15-pill"),
     ])
     return build_energy_15min_fig(sample), stats
+
+
+@callback(
+    Output("graph-decomp", "figure"),
+    Input("dr-from", "value"),
+    Input("dr-to", "value"),
+    Input("store-df", "data"),
+    prevent_initial_call=True,
+)
+def update_decomp(start, end, stored):
+    if not stored:
+        return empty_fig("Ejecuta el cálculo en Modo Avanzado")
+    try:
+        df = pd.read_json(StringIO(stored), orient="split")
+        df.index = pd.to_datetime(df.index)
+    except Exception:
+        return empty_fig("Sin datos")
+    if "dni" not in df.columns:
+        return empty_fig("Disponible solo en Modo Avanzado")
+    if start and end:
+        try:
+            df = df.loc[start:end]
+        except Exception:
+            return empty_fig("Rango de fechas inválido")
+    if df.empty:
+        return empty_fig("Sin datos en el rango seleccionado")
+    return build_decomp_fig(df)
+
+
+@callback(
+    Output("graph-waterfall", "figure"),
+    Input("store-losses", "data"),
+    prevent_initial_call=True,
+)
+def update_waterfall(stored):
+    if not stored:
+        return empty_fig("Ejecuta el cálculo en Modo Avanzado")
+    try:
+        p = json.loads(stored)
+    except Exception:
+        return empty_fig("Sin datos de pérdidas")
+    return build_waterfall_fig(p)
 
 
 @callback(
@@ -1565,6 +2206,7 @@ def parse_demand(contents, filename):
     Output("fin-graph-bill", "figure"),
     Output("fin-graph-curtail", "figure"),
     Output("fin-graph-energy", "figure"),
+    Output("fin-graph-payback", "figure"),
     Output("fin-recommendations", "children"),
     Output("fin-capex-summary", "children"),
     Output("fin-table-sis", "children"),
@@ -1579,10 +2221,20 @@ def parse_demand(contents, filename):
     State("inp-num-apagones", "value"),
     State("inp-dur-apagon", "value"),
     State("inp-cap-respaldo", "value"),
+    State("ui-mode", "data"),
+    State("inp-precio-base", "value"),
+    State("inp-precio-int", "value"),
+    State("inp-precio-punta", "value"),
+    State("inp-cargo-cap", "value"),
+    State("inp-cargo-dist", "value"),
+    State("inp-inflacion", "value"),
+    State("inp-descuento", "value"),
     prevent_initial_call=True,
 )
 def run_financial(_, store_df, store_meta, store_demand,
-                  costo_panel, costo_pila, num_apagones, dur_apagon, cap_respaldo):
+                  costo_panel, costo_pila, num_apagones, dur_apagon, cap_respaldo,
+                  ui_mode, precio_base, precio_int, precio_punta,
+                  cargo_cap, cargo_dist, inflacion, descuento):
     blank = empty_fig()
     dash_vals = ["—"] * 5
     foots = [""] * 5
@@ -1591,7 +2243,7 @@ def run_financial(_, store_df, store_meta, store_demand,
     empty_table = [html.Div("Sin datos.", className="rec-empty")]
 
     def err(msg):
-        return (*dash_vals, *foots, blank, blank, blank,
+        return (*dash_vals, *foots, blank, blank, blank, blank,
                 empty_recs, empty_summary, empty_table, "alert", msg)
 
     try:
@@ -1599,7 +2251,8 @@ def run_financial(_, store_df, store_meta, store_demand,
             raise ValueError(
                 "Primero corre el Simulador FV para calcular la generación solar.")
         if not store_demand:
-            raise ValueError("Sube un CSV de demanda válido.")
+            raise ValueError(
+                "Sube un CSV de demanda o genera un perfil con el estimador.")
 
         df_solar = pd.read_json(StringIO(store_df), orient="split")
         df_solar.index = pd.to_datetime(df_solar.index)
@@ -1609,6 +2262,19 @@ def run_financial(_, store_df, store_meta, store_demand,
         num_paneles = int(store_meta.get("num_paneles", 1))
         area = float(store_meta.get("area", 1.0))
 
+        # En Modo Avanzado se aplican las tarifas e inflación personalizadas;
+        # en Simple se usan los valores fijos del motor (None → defaults).
+        if (ui_mode or "simple") == "avanzado":
+            kw = dict(
+                precio_base=precio_base, precio_intermedio=precio_int,
+                precio_punta=precio_punta, cargo_capacidad=cargo_cap,
+                cargo_distribucion=cargo_dist,
+                tasa_inflacion=(float(inflacion) / 100.0) if inflacion is not None else None,
+                tasa_descuento=(float(descuento) / 100.0) if descuento is not None else None,
+            )
+        else:
+            kw = {}
+
         res = simular_financiero(
             df_solar=df_solar, df_demanda=df_dem,
             num_paneles=num_paneles, area=area,
@@ -1617,6 +2283,7 @@ def run_financial(_, store_df, store_meta, store_demand,
             cap_respaldo_max_kwh=float(cap_respaldo or 0),
             num_apagones=int(num_apagones or 0),
             duracion_horas_apagon=float(dur_apagon or 1.0),
+            **kw,
         )
 
         # KPIs
@@ -1640,6 +2307,7 @@ def run_financial(_, store_df, store_meta, store_demand,
         fig_bill = build_bill_compare_fig(res["df_recibo_sis"], res["df_recibo_base"])
         fig_curtail = build_curtail_fig(res["df_energia_mensual"])
         fig_energy = build_energy_month_fig(res["df_energia_mensual"])
+        fig_payback = build_payback_fig(res["df_flujo"])
 
         recs = build_recommendations(res["recomendaciones"])
 
@@ -1657,7 +2325,7 @@ def run_financial(_, store_df, store_meta, store_demand,
 
         return (kpi_roi, payback_txt, kpi_npv, kpi_ahorro, kpi_curtail,
                 foot_roi, foot_payback, foot_npv, foot_ahorro, foot_curtail,
-                fig_bill, fig_curtail, fig_energy,
+                fig_bill, fig_curtail, fig_energy, fig_payback,
                 recs, summary, table, "alert hidden", "")
 
     except Exception as exc:

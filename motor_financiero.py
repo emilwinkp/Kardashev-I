@@ -27,6 +27,21 @@ _FACTOR_VP_AHORROS = (
     HORIZONTE_ANIOS * ((1 + 0.0426) ** 6 / (1 + 0.007) ** 6) / (1 + 0.0411) ** 7
 )
 
+# Tasas por defecto para el modelo de valor presente configurable (Modo Avanzado).
+TASA_INFLACION_DEFAULT = 0.0426   # crecimiento anual del ahorro (precio energía)
+TASA_DESCUENTO_DEFAULT = 0.0411   # tasa de descuento del proyecto
+
+
+def factor_vp_ahorros(inflacion, descuento, horizonte=HORIZONTE_ANIOS):
+    """Factor de VP de una anualidad creciente (ahorro que crece con inflación).
+
+    Multiplica el ahorro anual del primer año para obtener el valor presente
+    de todo el flujo a lo largo del horizonte:
+        Σ_{t=1..N} (1+g)^(t-1) / (1+r)^t
+    """
+    return sum((1 + inflacion) ** (t - 1) / (1 + descuento) ** t
+               for t in range(1, int(horizonte) + 1))
+
 # Eficiencias y degradación de baterías
 EFICIENCIA_CARGA = 0.95
 EFICIENCIA_DESCARGA = 0.95
@@ -66,7 +81,10 @@ def _factor_potencia_efecto(fp):
 def simular_financiero(df_solar, df_demanda, num_paneles, area,
                        costo_panel_m2, costo_pila,
                        cap_respaldo_max_kwh=500, num_apagones=30,
-                       duracion_horas_apagon=1.5):
+                       duracion_horas_apagon=1.5,
+                       precio_base=None, precio_intermedio=None, precio_punta=None,
+                       cargo_capacidad=None, cargo_distribucion=None,
+                       tasa_inflacion=None, tasa_descuento=None):
     """Simula la operación del sistema FV+baterías y evalúa el proyecto.
 
     Parameters
@@ -84,6 +102,19 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     -------
     dict con KPIs, DataFrames de recibos, resumen mensual y recomendaciones.
     """
+    # ── Tarifas e inflación: usar los valores dados o los defaults fijos ──
+    p_base = PRECIO_BASE if precio_base is None else float(precio_base)
+    p_int = PRECIO_INTERMEDIO if precio_intermedio is None else float(precio_intermedio)
+    p_punta = PRECIO_PUNTA if precio_punta is None else float(precio_punta)
+    c_cap = CARGO_CAPACIDAD if cargo_capacidad is None else float(cargo_capacidad)
+    c_dist = CARGO_DISTRIBUCION if cargo_distribucion is None else float(cargo_distribucion)
+
+    # Tasas para el modelo de valor presente (anualidad creciente). Si no se
+    # dan, se usan los defaults — así el VPN y la gráfica de payback son
+    # siempre consistentes (la curva acumulada termina exactamente en el VPN).
+    inflacion = TASA_INFLACION_DEFAULT if tasa_inflacion is None else float(tasa_inflacion)
+    descuento = TASA_DESCUENTO_DEFAULT if tasa_descuento is None else float(tasa_descuento)
+
     # ── Combinar solar + demanda sobre el índice común (15 min, año completo) ──
     df = df_solar.copy()
     if df.index.tz is not None:
@@ -124,6 +155,12 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     #   3) cap_respaldo:    capacidad de respaldo configurada por el usuario
     # Nota: el NÚMERO de apagones no dimensiona la batería (un solo evento manda);
     #       sí afecta la operación y por tanto el ahorro.
+    #
+    # El sistema puede ser SIN BATERÍAS: si el usuario pone respaldo = 0 y
+    # apagones = 0, no se dimensiona ningún banco (autoconsumo directo, 0 pilas).
+    quiere_bateria = (cap_respaldo_max_kwh and cap_respaldo_max_kwh > 0) or \
+                     (num_apagones and num_apagones > 0)
+
     df_punta = df[df['periodo_cfe'] == 'Punta']
     consumo_punta_por_dia = df_punta.groupby(df_punta.index.date)['Energia_kWh'].sum()
     sizing_punta = consumo_punta_por_dia.max() if len(consumo_punta_por_dia) > 0 else 1000
@@ -131,7 +168,10 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     demanda_pico_kw = df['Energia_kWh'].max() * 4   # kWh/15min → kW
     energia_apagon = demanda_pico_kw * duracion_horas_apagon
 
-    sizing_diario_requerido = max(sizing_punta, energia_apagon, cap_respaldo_max_kwh)
+    if quiere_bateria:
+        sizing_diario_requerido = max(sizing_punta, energia_apagon, cap_respaldo_max_kwh)
+    else:
+        sizing_diario_requerido = 0
     cap_diaria_virtual_max = sizing_diario_requerido
 
     # ── Estado inicial de baterías ──
@@ -238,10 +278,10 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         if pd.isna(dem_punta):
             dem_punta = 0
 
-        costo_energia = (e_base * PRECIO_BASE + e_int * PRECIO_INTERMEDIO
-                         + e_punta * PRECIO_PUNTA)
-        subtotal = (costo_energia + dem_punta * CARGO_CAPACIDAD
-                    + dem_max * CARGO_DISTRIBUCION)
+        costo_energia = (e_base * p_base + e_int * p_int
+                         + e_punta * p_punta)
+        subtotal = (costo_energia + dem_punta * c_cap
+                    + dem_max * c_dist)
 
         kwh_mes = df_mes['compra_red_kwh'].sum()
         kvarh_mes = df_mes['reactive_red_kvarh'].sum()
@@ -270,10 +310,10 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         if pd.isna(dem_punta_b):
             dem_punta_b = 0
 
-        costo_energia_b = (eb * PRECIO_BASE + ei * PRECIO_INTERMEDIO
-                           + ep * PRECIO_PUNTA)
-        subtotal_b = (costo_energia_b + dem_punta_b * CARGO_CAPACIDAD
-                      + dem_max_b * CARGO_DISTRIBUCION)
+        costo_energia_b = (eb * p_base + ei * p_int
+                           + ep * p_punta)
+        subtotal_b = (costo_energia_b + dem_punta_b * c_cap
+                      + dem_max_b * c_dist)
 
         kwh_b = df_mes['Energia_kWh'].sum()
         kvarh_b = df_mes['Energia_kVArh'].sum()
@@ -303,7 +343,8 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     df_energia_mensual = pd.DataFrame(energia_mensual)
 
     # ── Evaluación económica ──
-    cant_pilas = max(1, int(np.ceil(sizing_diario_requerido / CAP_PILA_KWH)))
+    # Número de pilas: sigue al dimensionamiento (0 si no se requiere batería).
+    cant_pilas = int(np.ceil(sizing_diario_requerido / CAP_PILA_KWH))
 
     ahorro_anual = (df_recibo_base['Total_CFE_MXN'].sum()
                     - df_recibo_sis['Total_CFE_MXN'].sum())
@@ -313,8 +354,23 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     costo_total_pilas = cant_pilas * costo_pila
     capex = costo_total_paneles + costo_total_pilas
 
-    # VPN = valor presente de los ahorros − inversión (positivo = conviene)
-    vp_ahorros = ahorro_anual * _FACTOR_VP_AHORROS
+    # ── Flujo de caja descontado año a año (para la gráfica de payback) ──
+    # El ahorro crece con la inflación y se descuenta a la tasa indicada.
+    flujo = []
+    acumulado = -capex
+    for t in range(1, HORIZONTE_ANIOS + 1):
+        ahorro_desc = ahorro_anual * (1 + inflacion) ** (t - 1) / (1 + descuento) ** t
+        acumulado += ahorro_desc
+        flujo.append({
+            'Anio': t,
+            'Flujo_Descontado_MXN': round(ahorro_desc, 2),
+            'Acumulado_MXN': round(acumulado, 2),
+        })
+    df_flujo = pd.DataFrame(flujo)
+
+    # VPN = valor presente de los ahorros − inversión (positivo = conviene).
+    # Coincide con el último 'Acumulado_MXN' del flujo descontado.
+    vp_ahorros = ahorro_anual * factor_vp_ahorros(inflacion, descuento)
     npv = vp_ahorros - capex
     # J = función objetiva de costo de simulacion_1 (negativa = conviene)
     j_objetivo = capex - vp_ahorros
@@ -327,7 +383,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     total_generada = df['potencia_generada'].sum() * 0.25 / 1000
     pct_desperdicio = (total_desperdiciada / total_generada * 100
                        if total_generada > 0 else 0)
-    dinero_tirado = total_desperdiciada * PRECIO_INTERMEDIO
+    dinero_tirado = total_desperdiciada * p_int
 
     recomendaciones = _generar_recomendaciones(
         payback_anios=payback_anios, npv=npv, roi_pct=roi_pct,
@@ -341,6 +397,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         'df_recibo_sis': df_recibo_sis,
         'df_recibo_base': df_recibo_base,
         'df_energia_mensual': df_energia_mensual,
+        'df_flujo': df_flujo,
         'sizing_diario_requerido': sizing_diario_requerido,
         'cant_pilas': cant_pilas,
         'ahorro_anual': ahorro_anual,
@@ -424,11 +481,19 @@ def _generar_recomendaciones(payback_anios, npv, roi_pct, pct_desperdicio,
                       "CFE). Instalar un banco de capacitores reduciría el recibo."),
         })
 
-    # Banco diario
-    recs.append({
-        'tipo': 'info',
-        'texto': (f"El banco diario requiere {sizing:,.0f} kWh ({cant_pilas} pila(s) de "
-                  f"{CAP_PILA_KWH} kWh) para cubrir el peor día de consumo en horario punta."),
-    })
+    # Banco diario / baterías
+    if cant_pilas <= 0:
+        recs.append({
+            'tipo': 'info',
+            'texto': ("Sistema sin baterías (autoconsumo directo): no se dimensionó "
+                      "banco. Activa respaldo (kWh) o apagones para incluir "
+                      "almacenamiento y arbitraje de tarifa punta."),
+        })
+    else:
+        recs.append({
+            'tipo': 'info',
+            'texto': (f"El banco diario requiere {sizing:,.0f} kWh ({cant_pilas} pila(s) de "
+                      f"{CAP_PILA_KWH} kWh) para cubrir el peor día de consumo en horario punta."),
+        })
 
     return recs

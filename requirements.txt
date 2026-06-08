@@ -6,3 +6,4 @@ dash
 dash-bootstrap-components
 dash-leaflet
 timezonefinder
+requests
