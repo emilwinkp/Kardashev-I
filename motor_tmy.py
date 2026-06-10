@@ -57,6 +57,45 @@ def _fetch_tmy(lat, lon, timeout=20):
     return data
 
 
+def preparar_tmy(lat, lon, alt, year=2026, timeout=20):
+    """Precalcula lo necesario para barrer ángulos sobre el TMY (optimización).
+
+    Devuelve un dict con la geometría solar horaria (zenit/azimut) y la
+    irradiancia real del TMY (dni/ghi/dhi), todo alineado, para que la búsqueda
+    de tilt/azimut óptimos solo tenga que repetir la **transposición** (barata)
+    por cada candidato, sin volver a descargar ni recomputar la posición solar.
+
+    Reutiliza la caché del TMY. Lanza ``TMYUnavailable`` si no hay datos.
+    """
+    weather = _fetch_tmy(lat, lon, timeout=timeout)
+    n = len(weather)
+    idx_utc = pd.date_range(start=f"{year}-01-01 00:00", periods=n,
+                            freq="h", tz="UTC")
+    pressure = pvlib.atmosphere.alt2pres(alt)
+    sol = pvlib.solarposition.get_solarposition(idx_utc, lat, lon, alt,
+                                                pressure=pressure)
+    return {
+        "zenith": sol["apparent_zenith"].values,
+        "sol_az": sol["azimuth"].values,
+        "dni": weather["dni"].values,
+        "ghi": weather["ghi"].values,
+        "dhi": weather["dhi"].values,
+    }
+
+
+def poa_anual(prep, tilt, azimuth):
+    """Suma anual de POA (W/m²) para un tilt/azimut, usando datos de ``preparar_tmy``.
+
+    Proxy de energía para optimizar la orientación (área/η/PR son constantes).
+    """
+    irr = pvlib.irradiance.get_total_irradiance(
+        surface_tilt=tilt, surface_azimuth=azimuth,
+        solar_zenith=prep["zenith"], solar_azimuth=prep["sol_az"],
+        dni=prep["dni"], ghi=prep["ghi"], dhi=prep["dhi"],
+    )
+    return float(np.nan_to_num(irr["poa_global"]).sum())
+
+
 def calculate_tmy(lat, lon, alt, tz, tilt, azimuth, area, efficiency, PR,
                   year=2026, timeout=20):
     """Genera la producción FV usando datos meteorológicos reales (TMY/PVGIS).

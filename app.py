@@ -25,8 +25,8 @@ from motor_fisica_avanzada import calculate_advanced
 from motor_financiero import (HORIZONTE_ANIOS, TASA_DESCUENTO_DEFAULT,
                               TASA_INFLACION_DEFAULT, factor_vp_ahorros,
                               simular_financiero)
-from motor_diagnostico import dia_tipico, DIA_TIPICO_DEFAULT
-from motor_tmy import calculate_tmy, TMYUnavailable
+from motor_diagnostico import dia_tipico, preparar_dia, DIA_TIPICO_DEFAULT
+from motor_tmy import calculate_tmy, TMYUnavailable, preparar_tmy, poa_anual
 import perfil_demanda
 import tarifas_cfe
 import bateria_specs
@@ -78,11 +78,11 @@ ALT_DEFAULT = 540
 
 TZ_DEFAULT = "America/Mexico_City"
 TILT_DEFAULT = 22
-AZ_DEFAULT = 180
+AZ_DEFAULT = 0   # Convención de UI: 0° = Sur (se convierte a geográfica para pvlib)
 # Panel estándar de la industria (módulo monocristalino moderno):
 # 440 Wp en STC = 2.0 m² × 22 % de eficiencia (número nominal redondo).
 AREA_DEFAULT = 2.0      # m² por panel (estándar de la industria)
-N_PANELS_DEFAULT = 20   # número de paneles → total 40 m²
+N_PANELS_DEFAULT = 1   # número de paneles → total 40 m²
 EFF_DEFAULT = 0.22      # η módulo monocristalino moderno (~22 %)
 PNOM_DEFAULT = 440      # Wp nominal STC/panel = AREA_DEFAULT · EFF_DEFAULT · 1000
 PR_DEFAULT = 0.82
@@ -799,7 +799,7 @@ sidebar = html.Aside(className="sidebar", children=[
 
         # Azimut
         html.Div(className="field", style={"marginTop": "18px"}, children=[
-            html.Label("Azimut", style={"marginBottom": "8px"}),
+            html.Label("Azimut (0° = Sur)", style={"marginBottom": "8px"}),
             html.Div(className="compass-wrap", children=[
                 html.Div(className="compass", id="compass", children=[
                     html.Div(className="ring"),
@@ -864,24 +864,19 @@ sidebar = html.Aside(className="sidebar", children=[
                  children=(f"Panel estándar: {PNOM_DEFAULT:.0f} Wp · "
                            f"{AREA_DEFAULT:.1f} m² · η {EFF_DEFAULT * 100:.0f}% · "
                            f"{N_PANELS_DEFAULT * AREA_DEFAULT * EFF_DEFAULT:.2f} kWp")),
-        html.Div(className="field-row adv-only", children=[
-            html.Div(className="field", children=[
-                html.Label(["Eficiencia η (Realistic ~ 0.15-0.22) ",
-                            html.Span("0–1", className="hint")]),
-                dcc.Input(id="inp-eff", type="number", value=EFF_DEFAULT,
-                          step="any", min=0.01, max=1, className="input",
-                          debounce=True),
-            ]),
-            html.Div(className="field", children=[
-                html.Label(["Performance ratio (Loss factor ~ 0.7–0.8) ",
-                            html.Span("0–1", className="hint")]),
-                dcc.Input(id="inp-pr", type="number", value=PR_DEFAULT,
-                          step=0.01, min=0.01, max=1, className="input",
-                          debounce=True),
-                html.P("Solo aplica en Modo Simple. En Modo Avanzado las "
-                       "pérdidas se calculan en detalle (cascada) y el PR no "
-                       "interviene.", className="tarifa-desc adv-only"),
-            ]),
+        html.Div(className="field adv-only", children=[
+            html.Label(["Eficiencia η (Realistic ~ 0.15-0.22) ",
+                        html.Span("0–1", className="hint")]),
+            dcc.Input(id="inp-eff", type="number", value=EFF_DEFAULT,
+                      step="any", min=0.01, max=1, className="input",
+                      debounce=True),
+        ]),
+        # PR retirado de la UI: el Modo Simple usa el valor estándar fijo
+        # (PR_DEFAULT = 0.82) y el Modo Avanzado calcula las pérdidas en detalle
+        # (cascada), donde el PR no interviene. Se conserva como input oculto para
+        # alimentar al motor base sin romper los callbacks que lo leen.
+        html.Div(style={"display": "none"}, children=[
+            dcc.Input(id="inp-pr", type="number", value=PR_DEFAULT),
         ]),
         html.Div(className="field adv-only", children=[
             html.Label(["Factor de potencia ",
@@ -1085,7 +1080,9 @@ main = html.Main(className="main", children=[
             html.Div(className="card-head", children=[
                 html.Div(className="card-titlewrap", children=[
                     html.H3("Potencia de 1 panel", className="card-title"),
-                    html.P("W instantáneos en cielo claro", className="card-sub"),
+                    html.P("Potencia óptica en cielo claro (sin pérdidas ni "
+                           "recorte de inversor). Puede superar los Wp nominales "
+                           "cuando la POA > 1000 W/m².", className="card-sub"),
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
@@ -1104,7 +1101,7 @@ main = html.Main(className="main", children=[
                    className="sub", id="page-sub"),
         ]),
         html.Div(className="meta", id="page-meta", children=[
-            "MODELO JENSEN · CLEAR-SKY (INEICHEN)",
+            "MODELO JENSEN",
         ]),
     ]),
 
@@ -2172,10 +2169,16 @@ clientside_callback(
     function(v) {
         if (v === null || v === undefined) return '';
         const n = +v;
+        // Convención solar de UI: 0° = Sur, 90° = Este, 180° = Norte, 270° =
+        // Oeste → ángulo geográfico (0° = Norte) = (180 − n). Para la AGUJA
+        // usamos el valor sin módulo (geoRaw, continuo) para que la transición
+        // no dé una vuelta entera; el módulo (geo) solo nombra la dirección.
+        const geoRaw = 180 - n;
+        const geo = ((geoRaw % 360) + 360) % 360;
         const sld = document.getElementById('sld-azimuth');
         if (sld) sld.style.backgroundSize = ((n / 360) * 100) + '% 100%';
         const needle = document.getElementById('needle');
-        if (needle) needle.style.transform = 'translate(-50%,-100%) rotate(' + n + 'deg)';
+        if (needle) needle.style.transform = 'translate(-50%,-100%) rotate(' + geoRaw + 'deg)';
         const dirs = [
             {min:337.5,max:360,name:'NORTE'},{min:0,max:22.5,name:'NORTE'},
             {min:22.5,max:67.5,name:'NORESTE'},
@@ -2189,10 +2192,10 @@ clientside_callback(
         let name = 'NORTE';
         for (let i = 0; i < dirs.length; i++) {
             const d = dirs[i];
-            if (n >= d.min && n < d.max) { name = d.name; break; }
+            if (geo >= d.min && geo < d.max) { name = d.name; break; }
         }
-        const suffix = (n > 135 && n < 225) ? ' · óptimo en hemisferio N'
-                     : (n > 315 || n < 45) ? ' · óptimo en hemisferio S' : '';
+        const suffix = (geo > 135 && geo < 225) ? ' · óptimo en hemisferio N'
+                     : (geo > 315 || geo < 45) ? ' · óptimo en hemisferio S' : '';
         const dirEl = document.getElementById('val-azdir');
         if (dirEl) dirEl.textContent = name + suffix;
         return '';
@@ -2531,6 +2534,88 @@ def map_click(click):
 
 
 @callback(
+    Output("sld-tilt", "value", allow_duplicate=True),
+    Output("inp-tilt-num", "value", allow_duplicate=True),
+    Output("sld-azimuth", "value", allow_duplicate=True),
+    Output("inp-az-num", "value", allow_duplicate=True),
+    Input("inp-lat", "value"),
+    Input("inp-lon", "value"),
+    State("inp-alt", "value"),
+    State("inp-tz", "value"),
+    State("inp-area", "value"),
+    State("inp-eff", "value"),
+    State("src-irr", "value"),
+    prevent_initial_call=True,
+)
+def auto_orient(lat, lon, alt, tz, area, eff, src):
+    """Al cambiar la ubicación, fija la inclinación y el azimut óptimos por
+    producción (barrido con el motor, no por reglas).
+
+    - **Inclinación (tilt):** se optimiza con la **fuente seleccionada**. Con
+      **TMY real** (``motor_tmy``) el tilt refleja el clima del sitio (peso
+      estacional real); con **cielo claro**, el día típico (equinoccio). El tilt
+      es robusto al sesgo de marca de tiempo del TMY porque la elevación solar
+      es simétrica alrededor del mediodía. Si no hay red, TMY cae a cielo claro.
+    - **Azimut:** se optimiza **siempre con cielo claro** (da el ecuador, estable
+      y correcto). El azimut por TMY NO es fiable: el convenio de marca de tiempo
+      de PVGIS (irradiancia promediada por hora vs. posición solar instantánea)
+      introduce una asimetría Este/Oeste artificial que sesgaría el resultado.
+    """
+    try:
+        if lat is None or lon is None:
+            return (no_update,) * 4
+        lat, lon = float(lat), float(lon)
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            return (no_update,) * 4
+        alt = float(alt) if alt is not None and alt >= 0 else ALT_DEFAULT
+        eff = float(eff) if eff is not None and 0 < eff <= 1 else EFF_DEFAULT
+        area = float(area) if area is not None and area > 0 else AREA_DEFAULT
+        tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
+
+        # Fuente de optimización: TMY real si está seleccionado y hay datos.
+        usar_tmy = (src == "tmy")
+        prep = None
+        if usar_tmy:
+            try:
+                prep = preparar_tmy(lat, lon, alt)
+            except TMYUnavailable:
+                usar_tmy = False   # sin red → cae a cielo claro
+
+        # Geometría de cielo claro precalculada UNA vez (96 puntos): el barrido
+        # solo repite la transposición por ángulo (barata), sin recomputar la
+        # posición solar en cada candidato.
+        prep_cs = preparar_dia(lat, lon, alt, tz_motor)
+
+        def geo(az_ui):                       # UI (0°=Sur) → geográfico (0°=Norte)
+            return (180.0 - az_ui) % 360.0
+
+        def energia_cs(t, az_ui):    # cielo claro → AZIMUT estable
+            return poa_anual(prep_cs, t, geo(az_ui))
+
+        def energia(t, az_ui):       # fuente seleccionada (TMY/cielo claro) → TILT
+            if usar_tmy:
+                return poa_anual(prep, t, geo(az_ui))
+            return poa_anual(prep_cs, t, geo(az_ui))
+
+        # Punto de partida del azimut: hacia el ecuador (Sur en N, Norte en S).
+        az_base = 0 if lat >= 0 else 180
+
+        # 1) Tilt grueso (fuente seleccionada) mirando al ecuador.
+        t_coarse = max(range(0, 81, 5), key=lambda t: energia(t, az_base))
+        # 2) Azimut SIEMPRE con cielo claro: el azimut por TMY no es fiable por el
+        #    convenio de marca de tiempo de PVGIS (irradiancia promediada por hora)
+        #    que sesga Este/Oeste; el cielo claro da el ecuador, estable y correcto.
+        az_cands = [(az_base + d) % 360 for d in range(-45, 46, 5)]
+        best_az = max(az_cands, key=lambda a: energia_cs(t_coarse, a))
+        # 3) Tilt fino (fuente seleccionada) al mejor azimut.
+        lo, hi = max(0, t_coarse - 4), min(90, t_coarse + 4)
+        best_tilt = max(range(lo, hi + 1), key=lambda t: energia(t, best_az))
+        return best_tilt, best_tilt, best_az, best_az
+    except Exception:
+        return (no_update,) * 4
+
+
+@callback(
     Output("store-demand", "data", allow_duplicate=True),
     Output("consumo-status", "children"),
     Output("consumo-status", "className"),
@@ -2681,6 +2766,9 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         n = int(n_panels) if n_panels and n_panels >= 1 else 1
         total_area = n * float(area)
 
+        # Azimut de UI (0°=Sur, 90°=Este) → geográfico (0°=Norte) = (180 − az).
+        azimuth = (180.0 - float(azimuth if azimuth is not None else AZ_DEFAULT)) % 360.0
+
         modo = ui_mode or "simple"
         tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
         perdidas = None
@@ -2819,7 +2907,8 @@ def update_dia_tipico(dia, tilt, azimuth, lat, lon, alt, eff, area, tz):
         eff = float(eff) if eff is not None and 0 < eff <= 1 else EFF_DEFAULT
         area = float(area) if area is not None and area > 0 else AREA_DEFAULT
         tilt = float(tilt) if tilt is not None else TILT_DEFAULT
-        azimuth = float(azimuth) if azimuth is not None else AZ_DEFAULT
+        # Azimut de UI (0°=Sur, 90°=Este) → geográfico (0°=Norte) = (180 − az).
+        azimuth = (180.0 - float(azimuth if azimuth is not None else AZ_DEFAULT)) % 360.0
         tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
         df = dia_tipico(lat, lon, alt, tz_motor, tilt, azimuth, area, eff,
                         dia=dia or DIA_TIPICO_DEFAULT)
@@ -3388,6 +3477,33 @@ def _vida_str(vida):
     return f"{v:.1f} años · limita {vida['limita']}"
 
 
+# Mapa de códigos de dtype de Plotly (typed arrays) a numpy.
+_PLOTLY_DTYPES = {
+    "f8": "float64", "f4": "float32", "i1": "int8", "i2": "int16",
+    "i4": "int32", "i8": "int64", "u1": "uint8", "u2": "uint16",
+    "u4": "uint32", "u8": "uint64",
+}
+
+
+def _coerce_array(v):
+    """Normaliza un eje de traza a lista de Python.
+
+    Plotly/Dash serializa los arrays numéricos como binario base64
+    (``{"dtype": "f8", "bdata": "..."}``); aquí se decodifican a números. Los
+    ejes de texto (categorías, fechas) ya llegan como lista.
+    """
+    if v is None:
+        return None
+    if isinstance(v, dict) and "bdata" in v:
+        npdt = _PLOTLY_DTYPES.get(v.get("dtype"), "float64")
+        arr = np.frombuffer(base64.b64decode(v["bdata"]), dtype=npdt)
+        return arr.tolist()
+    try:
+        return list(v)
+    except TypeError:
+        return [v]
+
+
 def figure_to_df(fig):
     """Convierte una figura (dict de Plotly) en un DataFrame con sus datos.
 
@@ -3402,12 +3518,12 @@ def figure_to_df(fig):
     series = []
     for i, tr in enumerate(data):
         get = tr.get if isinstance(tr, dict) else (lambda k, d=None: getattr(tr, k, d))
-        y = get("y")
+        y = _coerce_array(get("y"))
         if y is None:
             continue
-        x = get("x")
+        x = _coerce_array(get("x"))
         name = get("name") or f"serie{i + 1}"
-        series.append((str(name), list(x) if x is not None else None, list(y)))
+        series.append((str(name), x, y))
     if not series:
         return None
     xs = [s[1] for s in series]

@@ -26,6 +26,34 @@ TURBIDEZ_DEFAULT = 3.0
 _BLOQUES_DIA = 96  # 24 h × 4 (15 min)
 
 
+def preparar_dia(lat, lon, alt, tz, dia=DIA_TIPICO_DEFAULT,
+                 turbidity=TURBIDEZ_DEFAULT):
+    """Precalcula geometría solar + cielo claro de un día típico para **barrer
+    ángulos** (optimización de orientación) sin recomputar nada por candidato.
+
+    Devuelve el mismo formato que ``motor_tmy.preparar_tmy``
+    (``{zenith, sol_az, dni, ghi, dhi}``), de modo que la suma de POA por ángulo
+    se obtiene con ``motor_tmy.poa_anual`` reutilizando una sola posición solar.
+    """
+    index = pd.date_range(start=f"{dia} 00:00", end=f"{dia} 23:45",
+                          freq="15min", tz=tz)
+    pressure = pvlib.atmosphere.alt2pres(alt)
+    sol = pvlib.solarposition.get_solarposition(index, lat, lon, alt,
+                                                pressure=pressure)
+    zenith = sol["apparent_zenith"].values
+    sol_az = sol["azimuth"].values
+    airmass_rel = pvlib.atmosphere.get_relative_airmass(zenith)
+    airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass_rel, pressure)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cs = pvlib.clearsky.ineichen(zenith, airmass_absolute=airmass_abs,
+                                     linke_turbidity=turbidity, altitude=alt)
+    return {
+        "zenith": zenith, "sol_az": sol_az,
+        "dni": np.asarray(cs["dni"]), "ghi": np.asarray(cs["ghi"]),
+        "dhi": np.asarray(cs["dhi"]),
+    }
+
+
 def dia_tipico(lat, lon, alt, tz, tilt, azimuth, area, eff,
                dia=DIA_TIPICO_DEFAULT, turbidity=TURBIDEZ_DEFAULT):
     """Calcula un día representativo de irradiancia y potencia de un panel.
@@ -62,8 +90,12 @@ def dia_tipico(lat, lon, alt, tz, tilt, azimuth, area, eff,
     airmass_rel = pvlib.atmosphere.get_relative_airmass(zenith)
     airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass_rel, pressure)
 
-    cs = pvlib.clearsky.ineichen(zenith, airmass_absolute=airmass_abs,
-                                 linke_turbidity=turbidity, altitude=alt)
+    # De noche (cenit ~90°) pvlib divide por ~0 y emite RuntimeWarning; esos
+    # valores se vuelven 0 igualmente. Silenciamos el ruido (se llama muchas
+    # veces durante la optimización de orientación).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cs = pvlib.clearsky.ineichen(zenith, airmass_absolute=airmass_abs,
+                                     linke_turbidity=turbidity, altitude=alt)
     irr = pvlib.irradiance.get_total_irradiance(
         surface_tilt=tilt, surface_azimuth=azimuth,
         solar_zenith=zenith, solar_azimuth=sol_az,
