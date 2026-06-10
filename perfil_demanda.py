@@ -96,6 +96,57 @@ def generar_perfil(kwh_dia, shape="residencial", year=2026):
     return df
 
 
+def generar_perfil_mensual(kwh_por_mes, shape="residencial", year=2026):
+    """Genera un perfil 15-min que respeta el consumo de cada mes.
+
+    A diferencia de :func:`generar_perfil` (un escalar replicado todo el año),
+    aquí se reparte la energía **mes a mes**, capturando la estacionalidad real
+    del recibo. Cada día del mes usa la misma forma diaria escalada al consumo
+    diario de ese mes, de modo que la suma de cada mes iguala ``kwh_por_mes[m]``.
+
+    Parameters
+    ----------
+    kwh_por_mes : sequence of 12 floats
+        Consumo objetivo de cada mes (Ene…Dic), en kWh.
+    shape : {"residencial", "pyme"}
+        Forma del perfil diario.
+    year : int
+        Año del índice (debe coincidir con el de la generación solar, 2026).
+
+    Returns
+    -------
+    DataFrame
+        Índice 15-min tz-naive con columnas ``Energia_kWh`` y ``Energia_kVArh``.
+    """
+    if kwh_por_mes is None or len(kwh_por_mes) != 12:
+        raise ValueError("Se requieren exactamente 12 valores (Ene…Dic).")
+    valores = [float(v or 0) for v in kwh_por_mes]
+    if all(v <= 0 for v in valores):
+        raise ValueError("Captura el consumo de al menos un mes (kWh > 0).")
+
+    forma = _FORMAS.get(shape, _forma_residencial)()  # 96 pesos, suma = 1
+    idx = pd.date_range(start=f"{year}-01-01 00:00",
+                        end=f"{year}-12-31 23:45", freq="15min")
+    meses = idx.month.values
+    energia = np.zeros(len(idx))
+
+    for m in range(1, 13):
+        mask = meses == m
+        n_bloques = int(mask.sum())
+        if n_bloques == 0:
+            continue
+        n_dias = n_bloques / _BLOQUES_DIA
+        kwh_dia_m = valores[m - 1] / n_dias if n_dias > 0 else 0.0
+        perfil_dia = forma * kwh_dia_m            # kWh por bloque, suma = kwh_dia_m
+        tiled = np.tile(perfil_dia, int(round(n_dias)))
+        energia[mask] = np.resize(tiled, n_bloques)
+
+    df = pd.DataFrame(index=idx)
+    df["Energia_kWh"] = energia
+    df["Energia_kVArh"] = energia * _TAN_PHI
+    return df
+
+
 def consumo_anual_kwh(df):
     """Consumo anual total (kWh) de un perfil generado."""
     return float(df["Energia_kWh"].sum())

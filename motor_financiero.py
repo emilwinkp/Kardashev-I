@@ -84,7 +84,8 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
                        duracion_horas_apagon=1.5,
                        precio_base=None, precio_intermedio=None, precio_punta=None,
                        cargo_capacidad=None, cargo_distribucion=None,
-                       tasa_inflacion=None, tasa_descuento=None):
+                       tasa_inflacion=None, tasa_descuento=None,
+                       horizonte=HORIZONTE_ANIOS):
     """Simula la operación del sistema FV+baterías y evalúa el proyecto.
 
     Parameters
@@ -183,6 +184,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     potencia_kw_red_lista = []
     reactive_kvarh_lista = []
     energia_desperdiciada_lista = []
+    descarga_total_kwh = 0.0   # throughput de descarga del banco (para ciclos)
 
     pot = df['potencia_generada'].values
     kvarh = df['Energia_kVArh'].values
@@ -217,7 +219,9 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
             else:
                 deficit = demanda_kwh - solar_kwh
                 descarga = deficit / EFICIENCIA_DESCARGA
+                prev_soc = soc_respaldo
                 soc_respaldo = max(0, soc_respaldo - descarga)
+                descarga_total_kwh += (prev_soc - soc_respaldo)
             compra_red_kwh = 0
             reactive_kvarh = 0
         else:
@@ -249,6 +253,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
             if tarifa == 'Punta' and compra_red_kwh > 0:
                 descarga_real = min(compra_red_kwh, soc_diario * EFICIENCIA_DESCARGA)
                 soc_diario -= (descarga_real / EFICIENCIA_DESCARGA)
+                descarga_total_kwh += (descarga_real / EFICIENCIA_DESCARGA)
                 compra_red_kwh -= descarga_real
 
         compra_kwh_red_lista.append(compra_red_kwh)
@@ -358,7 +363,8 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     # El ahorro crece con la inflación y se descuenta a la tasa indicada.
     flujo = []
     acumulado = -capex
-    for t in range(1, HORIZONTE_ANIOS + 1):
+    horizonte = max(1, int(horizonte))
+    for t in range(1, horizonte + 1):
         ahorro_desc = ahorro_anual * (1 + inflacion) ** (t - 1) / (1 + descuento) ** t
         acumulado += ahorro_desc
         flujo.append({
@@ -370,7 +376,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
 
     # VPN = valor presente de los ahorros − inversión (positivo = conviene).
     # Coincide con el último 'Acumulado_MXN' del flujo descontado.
-    vp_ahorros = ahorro_anual * factor_vp_ahorros(inflacion, descuento)
+    vp_ahorros = ahorro_anual * factor_vp_ahorros(inflacion, descuento, horizonte)
     npv = vp_ahorros - capex
     # J = función objetiva de costo de simulacion_1 (negativa = conviene)
     j_objetivo = capex - vp_ahorros
@@ -412,6 +418,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         'total_generada': total_generada,
         'pct_desperdicio': pct_desperdicio,
         'dinero_tirado': dinero_tirado,
+        'descarga_total_kwh': descarga_total_kwh,
         'cobertura': cobertura,
         'recomendaciones': recomendaciones,
     }

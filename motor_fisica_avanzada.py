@@ -123,9 +123,13 @@ def calculate_advanced(lat, lon, alt, tz, tilt, azimuth, area, efficiency, PR,
         e_iam = e_soil
     e_wire = e_iam * (1.0 - wiring_loss)
     e_inv = e_wire * eta_inv
-    e_pr = e_inv * PR  # PR como pérdidas residuales no modeladas
+    # En Modo Avanzado las pérdidas se modelan EXPLÍCITAMENTE (temperatura,
+    # suciedad, IAM, cableado, inversor y degradación). NO se aplica el PR global
+    # del motor base: hacerlo descontaría dos veces esas mismas pérdidas (el PR
+    # ya las agrupa). El parámetro PR se mantiene en la firma por compatibilidad,
+    # pero no interviene en la cascada avanzada.
     factor_degr = (1.0 - degradation) ** max(0, int(year_index))
-    e_net = e_pr * factor_degr
+    e_net = e_inv * factor_degr
 
     df["energia_generada_kWh"] = e_net
     df["potencia_generada"] = e_net / _BLOQUE_H * 1000.0  # kWh/bloque → W
@@ -139,8 +143,7 @@ def calculate_advanced(lat, lon, alt, tz, tilt, azimuth, area, efficiency, PR,
         "iam": s(e_soil) - s(e_iam),
         "cableado": s(e_iam) - s(e_wire),
         "inversor": s(e_wire) - s(e_inv),
-        "otras_pr": s(e_inv) - s(e_pr),
-        "degradacion": s(e_pr) - s(e_net),
+        "degradacion": s(e_inv) - s(e_net),
         "neto": s(e_net),
     }
     return df, perdidas

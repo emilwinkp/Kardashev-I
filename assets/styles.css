@@ -360,6 +360,21 @@ input[type=range]::-moz-range-thumb{
 .chart-wrap{position:relative}
 .chart-wrap .dash-graph,.chart-wrap .js-plotly-plot{width:100%}
 
+/* Botón de exportar datos a Excel: en su propia franja sobre la gráfica,
+   alineado a la derecha, para NO tapar leyendas, modebar ni datos del plot. */
+.chart-dl-btn{
+  display:block;width:-moz-fit-content;width:fit-content;
+  margin:0 2px 5px auto;cursor:pointer;
+  padding:3px 9px;border-radius:6px;
+  border:1px solid var(--border-strong);background:rgba(255,255,255,.02);
+  color:var(--fg-3);font-family:var(--mono);font-size:10px;letter-spacing:.04em;
+  transition:color .15s ease, border-color .15s ease, background .15s ease;
+}
+.chart-dl-btn:hover{
+  color:var(--fg);border-color:var(--accent-line);background:rgba(255,255,255,.05);
+}
+@media print{ .chart-dl-btn{display:none !important} }
+
 .range-row{
   display:flex;align-items:center;gap:8px;
   background:var(--bg-1);border:1px solid var(--border-strong);border-radius:7px;padding:4px 6px 4px 10px;
@@ -518,6 +533,71 @@ input[type=range]::-moz-range-thumb{
 body.mode-advanced .adv-only{display:block !important}
 /* Restaurar el layout flex de las filas de campos avanzadas */
 body.mode-advanced .field-row.adv-only{display:flex !important}
+/* Inverso: bloques visibles solo en Modo Simple, ocultos en Avanzado */
+.simple-only{display:block}
+body.mode-advanced .simple-only{display:none !important}
+
+/* ============== Tabla editable de demanda (12 meses) ============== */
+/* Hover de fila legible en tema oscuro: el default deja la fila casi blanca
+   y el número (texto claro) se pierde. Forzamos tinte azul + texto blanco. */
+#tabla-demanda-12m .dash-spreadsheet-container tr:hover td,
+#tabla-demanda-12m .dash-spreadsheet-inner tr:hover td,
+#tabla-demanda-12m tr:hover td{
+  background-color:rgba(90,150,255,.16) !important;
+  color: #000 !important;
+}
+#tabla-demanda-12m tr:hover td .dash-cell-value,
+#tabla-demanda-12m tr:hover td input.dash-cell-value{
+  color: #1883ff !important;
+}
+
+/* ============== Cotización realista (capa opcional) ============== */
+.cot-block{
+  margin-top:6px;padding:12px;border:1px dashed var(--border-strong);
+  border-radius:10px;background:rgba(255,255,255,.012);
+}
+
+/* ============== Reporte imprimible ============== */
+.report-doc{display:flex;flex-direction:column;gap:14px}
+.report-head{
+  display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+  padding-bottom:10px;border-bottom:1px solid var(--border-strong);
+}
+.report-date{font-family:var(--mono);font-size:11px;color:var(--fg-3)}
+.report-section{display:flex;flex-direction:column;gap:4px}
+.report-h{
+  margin:4px 0 2px;font-size:11px;font-family:var(--mono);font-weight:500;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--fg-2);
+}
+.report-charts{display:flex;flex-direction:column;gap:18px;margin-top:16px}
+.report-chart{display:flex;flex-direction:column;gap:4px}
+.report-group-h{
+  margin-top:8px;font-size:12px;font-weight:600;letter-spacing:-.01em;
+  color:var(--fg);border-bottom:1px solid var(--border-strong);padding-bottom:4px;
+}
+
+/* Impresión: aislar el reporte (texto + gráficas) y ocultar el resto */
+@media print{
+  body{background:#fff !important}
+  .topbar,.sidebar,.app-footer,#landing{display:none !important}
+  body *{visibility:hidden !important}
+  #fin-report-card,#fin-report-card *{visibility:visible !important}
+  #fin-report-card{
+    position:absolute;left:0;top:0;width:100%;
+    border:none !important;box-shadow:none !important;background:#fff !important;
+  }
+  #fin-report-card .card-head button{display:none !important}
+  /* Recolorear SOLO el texto del reporte; no tocar las gráficas (SVG Plotly) */
+  #fin-report-card .card-title,
+  #fin-report-card .card-sub,
+  #fin-report-card .report-doc,
+  #fin-report-card .report-doc *,
+  #fin-report-card .report-group-h,
+  #fin-report-card .report-h{color:#111 !important}
+  .report-head{border-color:#ccc !important}
+  .fin-summary-row{border-color:#ddd !important}
+  .report-chart{break-inside:avoid;page-break-inside:avoid}
+}
 
 /* Botón de modo en la topbar */
 .mode-btn{
@@ -616,6 +696,21 @@ body.mode-advanced .mode-btn{
   font-family:var(--mono);
 }
 .radio-row label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+/* Toggle segmentado (pills) — usado por la fuente de irradiancia y el día típico */
+.seg{
+  display:inline-flex;gap:3px;flex-wrap:wrap;
+  background:var(--bg-2);border:1px solid var(--border);
+  border-radius:8px;padding:3px;
+}
+.seg label{
+  display:inline-flex;align-items:center;cursor:pointer;
+  font-family:var(--mono);font-size:11px;letter-spacing:.01em;
+  padding:5px 11px;border-radius:6px;color:var(--fg-3);
+  transition:background .15s ease,color .15s ease;white-space:nowrap;
+}
+.seg label:hover{color:var(--fg-2)}
+.seg input{position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none}
+.seg label:has(input:checked){background:var(--accent);color:#000;font-weight:500}
 .chk-row{font-size:12px;color:var(--fg-2);font-family:var(--mono)}
 .chk-row label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 .consumo-status{

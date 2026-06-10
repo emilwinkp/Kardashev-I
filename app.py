@@ -10,8 +10,8 @@ from io import StringIO
 from zoneinfo import ZoneInfo
 
 import dash
-from dash import (Input, Output, State, callback, clientside_callback, dcc,
-                  html, no_update)
+from dash import (ALL, Input, Output, State, callback, clientside_callback,
+                  ctx, dash_table, dcc, html, no_update)
 import dash_leaflet as dl
 import numpy as np
 import pandas as pd
@@ -22,9 +22,14 @@ from timezonefinder import TimezoneFinder
 
 from motor_2 import calculate
 from motor_fisica_avanzada import calculate_advanced
-from motor_financiero import HORIZONTE_ANIOS, simular_financiero
+from motor_financiero import (HORIZONTE_ANIOS, TASA_DESCUENTO_DEFAULT,
+                              TASA_INFLACION_DEFAULT, factor_vp_ahorros,
+                              simular_financiero)
+from motor_diagnostico import dia_tipico, DIA_TIPICO_DEFAULT
+from motor_tmy import calculate_tmy, TMYUnavailable
 import perfil_demanda
 import tarifas_cfe
+import bateria_specs
 from geo_utils import fetch_altitude
 
 _tf = TimezoneFinder()
@@ -74,9 +79,12 @@ ALT_DEFAULT = 540
 TZ_DEFAULT = "America/Mexico_City"
 TILT_DEFAULT = 22
 AZ_DEFAULT = 180
-AREA_DEFAULT = 2.1      # m² por panel
-N_PANELS_DEFAULT = 20   # número de paneles → total 42 m²
-EFF_DEFAULT = 0.21
+# Panel estándar de la industria (módulo monocristalino moderno):
+# 440 Wp en STC = 2.0 m² × 22 % de eficiencia (número nominal redondo).
+AREA_DEFAULT = 2.0      # m² por panel (estándar de la industria)
+N_PANELS_DEFAULT = 20   # número de paneles → total 40 m²
+EFF_DEFAULT = 0.22      # η módulo monocristalino moderno (~22 %)
+PNOM_DEFAULT = 440      # Wp nominal STC/panel = AREA_DEFAULT · EFF_DEFAULT · 1000
 PR_DEFAULT = 0.82
 
 # Defaults de física avanzada (Modo Avanzado). En UI se usan unidades amables
@@ -90,9 +98,12 @@ ETA_INV_DEFAULT = 97    # % eficiencia del inversor
 DEGR_DEFAULT = 0.5      # %/año degradación
 
 # Consumo (Modo Simple)
-KWH_DIA_DEFAULT = 15    # kWh/día
+KWH_MES_DEFAULT = 450   # kWh/mes (≈ 15 kWh/día, dato del recibo)
 RECIBO_MES_DEFAULT = 1500  # MXN/mes
-TARIFA_DEFAULT = "DAC"
+FAMILIA_DEFAULT = "domestica"
+SUBTARIFA_DEFAULT = "1C"
+MESES_ES_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                  "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 # Defaults financieros (editables en la página de análisis)
 COSTO_PANEL_M2_DEFAULT = 1000     # MXN / m²
@@ -100,6 +111,14 @@ COSTO_PILA_DEFAULT = 500000       # MXN / pila (100 kWh)
 NUM_APAGONES_DEFAULT = 10
 DUR_APAGON_DEFAULT = 1.5          # horas
 CAP_RESPALDO_DEFAULT = 100        # kWh
+
+# Cotización realista (capa opcional dentro del análisis)
+COSTO_KWH_BESS_DEFAULT = 12000    # MXN/kWh instalado (LiFePO4 llave en mano)
+BOS_PCT_DEFAULT = 30              # % BOS sobre equipo (inversores, montaje, instalación, trámites)
+COSTO_TOTAL_DEFAULT = 2000000    # MXN — costo total del proyecto (cotización directa)
+COT_APAGONES_DEFAULT = 12         # apagones/año (para pérdidas evitadas)
+COT_HORAS_DEFAULT = 2             # h por apagón
+COT_COSTO_HORA_DEFAULT = 5000     # MXN/hora de inactividad
 
 # Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
 PRECIO_BASE_DEFAULT = 1.10        # MXN/kWh
@@ -335,6 +354,63 @@ def build_energy_15min_fig(sample):
     return fig
 
 
+# ───────────────────────── Diagnóstico rápido (día típico) ─────────────────────
+def build_dia_tipico_irr_fig(df):
+    """Irradiancia de un día típico: GHI/DNI/DHI + POA (W/m²) vs hora del día."""
+    x = df.index
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=df["poa_global"], name="POA", mode="lines",
+        line=dict(color=ACCENT, width=1.8), fill="tozeroy", fillcolor=ACCENT_FILL,
+        hovertemplate="%{x|%H:%M}<br>POA %{y:.0f} W/m²<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=x, y=df["ghi"], name="GHI", mode="lines",
+        line=dict(color=INFO, width=1.3),
+        hovertemplate="%{x|%H:%M}<br>GHI %{y:.0f} W/m²<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=x, y=df["dni"], name="DNI", mode="lines",
+        line=dict(color=ACCENT_CMP, width=1.2, dash="dot"),
+        hovertemplate="%{x|%H:%M}<br>DNI %{y:.0f} W/m²<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=x, y=df["dhi"], name="DHI", mode="lines",
+        line=dict(color=INFO_CMP, width=1.2, dash="dot"),
+        hovertemplate="%{x|%H:%M}<br>DHI %{y:.0f} W/m²<extra></extra>"))
+    fig.update_layout(**_base_layout(margin_b=30))
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left",
+                    x=0, font=dict(size=10, color=TEXT, family=FONT_FAMILY),
+                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=50, r=10, t=30, b=30),
+    )
+    fig.update_layout(**_axes(" W/m²"))
+    fig.update_layout(hovermode="x unified")
+    fig.update_xaxes(type="date", tickformat="%H:%M", dtick=3 * 3600 * 1000)
+    return fig
+
+
+def build_dia_tipico_pot_fig(df):
+    """Potencia de un solo panel (W) a lo largo del día típico."""
+    x = df.index
+    pico = df["potencia_panel_W"].max()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=df["potencia_panel_W"], mode="lines",
+        line=dict(color=SUCCESS, width=1.8), fill="tozeroy",
+        fillcolor="rgba(34,197,94,0.18)",
+        hovertemplate="%{x|%H:%M}<br>%{y:.0f} W<extra></extra>", name="1 panel"))
+    fig.update_layout(**_base_layout())
+    fig.update_layout(**_axes(" W"))
+    fig.update_layout(hovermode="x unified")
+    fig.update_xaxes(type="date", tickformat="%H:%M", dtick=3 * 3600 * 1000)
+    if pico and pico > 0:
+        fig.add_hline(y=pico, line=dict(color=TICK, width=1, dash="dot"),
+                      annotation_text=f"pico {pico:.0f} W",
+                      annotation_position="top left",
+                      annotation_font=dict(size=10, color="#525252"))
+    return fig
+
+
 # ───────────────────────── Advanced figures ────────────────────────────────────
 def build_decomp_fig(sample):
     """4 paneles GHI/DNI/DHI/POA (W/m²) + elevación solar sobre GHI."""
@@ -343,7 +419,7 @@ def build_decomp_fig(sample):
         specs=[[{"secondary_y": True}, {}], [{}, {}]],
         subplot_titles=("GHI + elevación solar", "DNI (haz directo)",
                         "DHI (difusa)", "POA / Gtot (plano del panel)"),
-        horizontal_spacing=0.10, vertical_spacing=0.20,
+        horizontal_spacing=0.10, vertical_spacing=0.28,
     )
     x = sample.index
     # GHI + elevación solar (eje secundario)
@@ -370,15 +446,28 @@ def build_decomp_fig(sample):
                              hovertemplate="POA %{y:.0f} W/m²<extra></extra>"),
                   row=2, col=2)
     fig.update_layout(**_base_layout(margin_l=45, margin_b=30))
-    fig.update_layout(showlegend=False)
+    fig.update_layout(showlegend=False, margin=dict(l=45, r=10, t=28, b=30))
     fig.update_xaxes(showgrid=False, linecolor="#1a1a1a", tickcolor=TICK,
                      zeroline=False, type="date")
     fig.update_yaxes(gridcolor=GRID, showgrid=True, linecolor="#1a1a1a",
                      tickcolor=TICK, zeroline=False)
+
+    # Headroom (~15%) para que los picos no se solapen con el título del subplot.
+    def _hr(col):
+        if col not in sample.columns:
+            return None
+        m = float(np.nanmax(sample[col].values)) if len(sample) else 0.0
+        return [0, m * 1.15] if m > 0 else None
+    for col, (r, c) in {"ghi": (1, 1), "dni": (1, 2),
+                        "dhi": (2, 1), "poa_global": (2, 2)}.items():
+        rng = _hr(col)
+        if rng is not None:
+            fig.update_yaxes(range=rng, row=r, col=c, secondary_y=False)
+
     fig.update_yaxes(title_text="W/m²", row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="°", row=1, col=1, secondary_y=True,
                      showgrid=False, range=[0, 90])
-    fig.for_each_annotation(lambda a: a.update(font=dict(size=12.5, color=TEXT)))
+    fig.for_each_annotation(lambda a: a.update(font=dict(size=12, color=TEXT)))
     return fig
 
 
@@ -391,7 +480,6 @@ def build_waterfall_fig(p):
         ("IAM", "relative", -p.get("iam", 0)),
         ("Cableado", "relative", -p.get("cableado", 0)),
         ("Inversor", "relative", -p.get("inversor", 0)),
-        ("Otras (PR)", "relative", -p.get("otras_pr", 0)),
         ("Degradación", "relative", -p.get("degradacion", 0)),
         ("Neto", "total", 0),
     ]
@@ -518,6 +606,13 @@ def build_recibo_table(df):
             cells.append(html.Td(txt))
         rows.append(html.Tr(cells))
     return html.Table(className="fin-table", children=[header, html.Tbody(rows)])
+
+
+def chart_dl_btn(gid):
+    """Botón pequeño para exportar a Excel los datos de la gráfica ``gid``."""
+    return html.Button(
+        "⬇ Excel", id={"type": "dl-graph", "index": gid},
+        className="chart-dl-btn", n_clicks=0, title="Exportar datos a Excel")
 
 
 def build_recommendations(recs):
@@ -740,29 +835,41 @@ sidebar = html.Aside(className="sidebar", children=[
             html.H3("Sistema"),
             html.Span("03", className="num"),
         ]),
-        html.Div(className="field-row", children=[
+        html.Div(className="field", children=[
+            html.Label(["Núm. paneles ",
+                        html.Span("uds", className="hint")]),
+            dcc.Input(id="inp-n-panels", type="number",
+                      value=N_PANELS_DEFAULT, step=1, min=1,
+                      className="input", debounce=True),
+        ]),
+        # Área y potencia nominal por panel: solo Modo Avanzado (personalización).
+        # En Modo Simple se usa el panel estándar de la industria (ver abajo).
+        html.Div(className="field-row adv-only", children=[
             html.Div(className="field", children=[
-                html.Label(["Núm. paneles ",
-                            html.Span("uds", className="hint")]),
-                dcc.Input(id="inp-n-panels", type="number",
-                          value=N_PANELS_DEFAULT, step=1, min=1,
-                          className="input", debounce=True),
-            ]),
-            html.Div(className="field", children=[
-                html.Label(["Área / panel ",
+                html.Label(["Área/panel ",
                             html.Span("m²", className="hint")]),
                 dcc.Input(id="inp-area", type="number", value=AREA_DEFAULT,
                           step=0.1, min=0.1, className="input", debounce=True),
             ]),
+            html.Div(className="field", children=[
+                html.Label(["Potencia nominal ",
+                            html.Span("Wp · STC", className="hint")]),
+                dcc.Input(id="inp-pnom", type="number", value=PNOM_DEFAULT,
+                          step="any", min=1, className="input", debounce=True),
+            ]),
         ]),
         html.Div(id="total-area-display", className="total-area-display",
                  children=f"Área total: {N_PANELS_DEFAULT * AREA_DEFAULT:.1f} m²"),
+        html.Div(id="stc-power-display", className="total-area-display",
+                 children=(f"Panel estándar: {PNOM_DEFAULT:.0f} Wp · "
+                           f"{AREA_DEFAULT:.1f} m² · η {EFF_DEFAULT * 100:.0f}% · "
+                           f"{N_PANELS_DEFAULT * AREA_DEFAULT * EFF_DEFAULT:.2f} kWp")),
         html.Div(className="field-row adv-only", children=[
             html.Div(className="field", children=[
                 html.Label(["Eficiencia η (Realistic ~ 0.15-0.22) ",
                             html.Span("0–1", className="hint")]),
                 dcc.Input(id="inp-eff", type="number", value=EFF_DEFAULT,
-                          step=0.01, min=0.01, max=1, className="input",
+                          step="any", min=0.01, max=1, className="input",
                           debounce=True),
             ]),
             html.Div(className="field", children=[
@@ -771,6 +878,9 @@ sidebar = html.Aside(className="sidebar", children=[
                 dcc.Input(id="inp-pr", type="number", value=PR_DEFAULT,
                           step=0.01, min=0.01, max=1, className="input",
                           debounce=True),
+                html.P("Solo aplica en Modo Simple. En Modo Avanzado las "
+                       "pérdidas se calculan en detalle (cascada) y el PR no "
+                       "interviene.", className="tarifa-desc adv-only"),
             ]),
         ]),
         html.Div(className="field adv-only", children=[
@@ -884,9 +994,27 @@ sidebar = html.Aside(className="sidebar", children=[
         ]),
     ]),
 
+    html.Div(className="section", children=[
+        html.Div(className="section-head", children=[
+            html.H3("Fuente de irradiancia"),
+            html.Span("05", className="num"),
+        ]),
+        dcc.RadioItems(
+            id="src-irr", className="seg",
+            options=[
+                {"label": "Cielo claro", "value": "clearsky"},
+                {"label": "TMY real · PVGIS", "value": "tmy"},
+            ],
+            value="clearsky",
+        ),
+        html.Div(id="src-irr-hint", className="hint",
+                 style={"marginTop": "6px"},
+                 children="Modelo de cielo despejado (optimista, determinista)."),
+    ]),
+
     html.Button(id="btn-calc", className="calc-btn", n_clicks=0, children=[
         svg_img(_ICON_BOLT, 14, 14),
-        html.Span("Calcular generación"),
+        html.Span("Calcular generación anual"),
         html.Span("⌘ ⏎", className="kbd"),
     ]),
 ])
@@ -916,7 +1044,60 @@ main = html.Main(className="main", children=[
         ]),
     ]),
 
+    # ── Diagnóstico rápido (siempre visible, sin botón) ──
     html.Div(className="page-head", children=[
+        html.Div(children=[
+            html.H1("Diagnóstico rápido"),
+            html.P("Cómo se comporta 1 panel en un día típico de cielo claro · "
+                   "reacciona en vivo al mover inclinación y azimut.",
+                   className="sub"),
+        ]),
+        html.Div(className="meta", children=[
+            dcc.RadioItems(
+                id="dia-tipico-sel", className="seg",
+                options=[
+                    {"label": "Equinoccio", "value": "2026-03-21"},
+                    {"label": "Verano", "value": "2026-06-21"},
+                    {"label": "Invierno", "value": "2026-12-21"},
+                ],
+                value=DIA_TIPICO_DEFAULT, inline=True,
+            ),
+        ]),
+    ]),
+    html.Div(className="grid-12", children=[
+        html.Div(className="card col-7", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Irradiancia del día · GHI / DNI / DHI / POA",
+                            className="card-title"),
+                    html.P("W/m² sobre el plano del panel para el día seleccionado",
+                           className="card-sub"),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-dia-irr"),
+                dcc.Graph(id="graph-dia-irr", figure=empty_fig("Calculando…"),
+                          config={"displayModeBar": False},
+                          style={"height": "280px", "width": "100%"}),
+            ]),
+        ]),
+        html.Div(className="card col-5", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Potencia de 1 panel", className="card-title"),
+                    html.P("W instantáneos en cielo claro", className="card-sub"),
+                ]),
+            ]),
+            html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-dia-pot"),
+                dcc.Graph(id="graph-dia-pot", figure=empty_fig("Calculando…"),
+                          config={"displayModeBar": False},
+                          style={"height": "280px", "width": "100%"}),
+            ]),
+        ]),
+    ]),
+
+    html.Div(className="page-head", style={"marginTop": "8px"}, children=[
         html.Div(children=[
             html.H1("Resumen anual"),
             html.P("Ejecuta el cálculo para ver los resultados.",
@@ -960,6 +1141,7 @@ main = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap tall", children=[
+                chart_dl_btn("graph-timeseries"),
                 dcc.Loading(
                     dcc.Graph(
                         id="graph-timeseries", figure=empty_fig(),
@@ -1010,6 +1192,7 @@ main = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-monthly"),
                 dcc.Graph(id="graph-monthly", figure=empty_fig(),
                           config={"displayModeBar": False},
                           style={"height": "260px", "width": "100%"}),
@@ -1029,6 +1212,7 @@ main = html.Main(className="main", children=[
                          children="Clic en la leyenda para mostrar/ocultar · doble clic para aislar"),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-irradiance"),
                 dcc.Graph(id="graph-irradiance",
                           figure=empty_fig("Ejecuta el cálculo primero"),
                           config={"displayModeBar": False,
@@ -1084,6 +1268,7 @@ main = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-energy-15min"),
                 dcc.Loading(
                     dcc.Graph(
                         id="graph-energy-15min",
@@ -1111,6 +1296,7 @@ main = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-decomp"),
                 dcc.Graph(id="graph-decomp",
                           figure=empty_fig("Ejecuta el cálculo en Modo Avanzado"),
                           config={"displayModeBar": False},
@@ -1129,6 +1315,7 @@ main = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("graph-waterfall"),
                 dcc.Graph(id="graph-waterfall",
                           figure=empty_fig("Ejecuta el cálculo en Modo Avanzado"),
                           config={"displayModeBar": False},
@@ -1186,66 +1373,222 @@ finance_page = html.Main(className="main", children=[
             ]),
         ]),
         html.Div(className="fin-config", children=[
-            dcc.Upload(
-                id="upload-demanda",
-                className="fin-upload",
-                children=html.Div([
-                    svg_img(_ICON_ENERGY, 18, 18),
-                    html.Div([
-                        html.Strong("Arrastra o haz clic"),
-                        html.Span(" para subir el CSV de demanda", className="fin-up-sub"),
-                    ]),
-                    html.Div(
-                        "Columnas: Fecha_Hora · Energia_kWh · Energia_kVArh (15 min, 2026)",
-                        className="fin-up-hint"),
-                ]),
-                multiple=False,
-                accept=".csv",
-            ),
-            html.Div(id="fin-upload-status", className="fin-up-status"),
-
-            # ── Alternativa sin CSV: tarifa + perfil sintético de demanda ──
-            html.Div(className="fin-divider", children="o estima tu demanda"),
-            html.Div(className="fin-tarifa", children=[
-                html.Div(className="field", children=[
-                    html.Label(["Tarifa CFE ",
-                                html.Span("", id="tarifa-fecha", className="hint")]),
-                    dcc.Dropdown(
-                        id="dd-tarifa", className="dd-tarifa",
-                        options=tarifas_cfe.opciones_dropdown(),
-                        value=TARIFA_DEFAULT, clearable=False,
-                    ),
-                    html.P("", id="tarifa-desc", className="tarifa-desc"),
-                ]),
-                html.Div(className="field", children=[
-                    dcc.RadioItems(
-                        id="consumo-modo", className="radio-row",
-                        options=[
-                            {"label": " kWh / día", "value": "kwh"},
-                            {"label": " Recibo MXN / mes", "value": "recibo"},
-                        ],
-                        value="kwh", inline=True,
-                    ),
-                ]),
-                html.Div(className="field", children=[
-                    html.Div(id="wrap-kwh", children=[
-                        html.Label(["Consumo diario ",
-                                    html.Span("kWh/día", className="hint")]),
-                        dcc.Input(id="inp-kwh-dia", type="number",
-                                  value=KWH_DIA_DEFAULT, step="any", min=0.1,
-                                  className="input", debounce=True),
-                    ]),
-                    html.Div(id="wrap-recibo", style={"display": "none"}, children=[
-                        html.Label(["Recibo mensual ",
-                                    html.Span("MXN/mes", className="hint")]),
-                        dcc.Input(id="inp-recibo-mes", type="number",
-                                  value=RECIBO_MES_DEFAULT, step="any", min=1,
-                                  className="input", debounce=True),
-                    ]),
-                ]),
-                html.Div(id="consumo-status", className="consumo-status"),
+            # ── Método de captura de demanda (mutuamente excluyente) ──
+            html.Div(className="field", children=[
+                html.Label("¿Cómo quieres capturar tu consumo?"),
+                dcc.RadioItems(
+                    id="demanda-metodo", className="radio-row",
+                    options=[
+                        {"label": " Recibo o kWh mensual", "value": "rapido"},
+                        {"label": " Tabla de 12 meses", "value": "tabla"},
+                        {"label": " Subir CSV de medición", "value": "csv"},
+                    ],
+                    value="rapido", inline=True,
+                ),
+                html.P("Elige un solo método: con CSV o tabla no necesitas el "
+                       "dato rápido, y viceversa.", className="tarifa-desc"),
             ]),
 
+            # ── Método A: CSV de medición real ──
+            html.Div(id="wrap-demanda-csv", style={"display": "none"}, children=[
+                dcc.Upload(
+                    id="upload-demanda",
+                    className="fin-upload",
+                    children=html.Div([
+                        svg_img(_ICON_ENERGY, 18, 18),
+                        html.Div([
+                            html.Strong("Arrastra o haz clic"),
+                            html.Span(" para subir el CSV de demanda",
+                                      className="fin-up-sub"),
+                        ]),
+                        html.Div(
+                            "Columnas: Fecha_Hora · Energia_kWh · Energia_kVArh "
+                            "(15 min, 2026)",
+                            className="fin-up-hint"),
+                    ]),
+                    multiple=False,
+                    accept=".csv",
+                ),
+                html.Div(id="fin-upload-status", className="fin-up-status"),
+            ]),
+
+            # ── Tarifa CFE (compartida por "rápido" y "tabla") ──
+            html.Div(id="wrap-demanda-tarifa", children=[
+                html.Div(className="fin-tarifa", children=[
+                    html.Div(className="field", children=[
+                        html.Label(["Tarifa CFE ",
+                                    html.Span("", id="tarifa-fecha", className="hint")]),
+                        dcc.Dropdown(
+                            id="dd-tarifa", className="dd-tarifa",
+                            options=tarifas_cfe.familias_dropdown(),
+                            value=FAMILIA_DEFAULT, clearable=False,
+                        ),
+                    ]),
+                    html.Div(id="wrap-subtarifa", className="field", children=[
+                        html.Label(["Subtarifa doméstica ",
+                                    html.Span("región", className="hint")]),
+                        dcc.Dropdown(
+                            id="dd-subtarifa", className="dd-tarifa",
+                            options=tarifas_cfe.subtarifas_dropdown("domestica"),
+                            value=SUBTARIFA_DEFAULT, clearable=False,
+                        ),
+                    ]),
+                    html.P("", id="tarifa-desc", className="tarifa-desc"),
+                ]),
+            ]),
+
+            # ── Método A (rápido): un solo dato mensual ──
+            html.Div(id="wrap-demanda-rapido", children=[
+                html.Div(className="fin-tarifa", children=[
+                    html.Div(className="field", children=[
+                        dcc.RadioItems(
+                            id="consumo-modo", className="radio-row",
+                            options=[
+                                {"label": " kWh / mes", "value": "kwh"},
+                                {"label": " Recibo MXN / mes", "value": "recibo"},
+                            ],
+                            value="kwh", inline=True,
+                        ),
+                    ]),
+                    html.Div(className="field", children=[
+                        html.Div(id="wrap-kwh", children=[
+                            html.Label(["Consumo mensual ",
+                                        html.Span("kWh/mes", className="hint")]),
+                            dcc.Input(id="inp-kwh-mes", type="number",
+                                      value=KWH_MES_DEFAULT, step="any", min=0.1,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(id="wrap-recibo", style={"display": "none"}, children=[
+                            html.Label(["Recibo mensual ",
+                                        html.Span("MXN/mes", className="hint")]),
+                            dcc.Input(id="inp-recibo-mes", type="number",
+                                      value=RECIBO_MES_DEFAULT, step="any", min=1,
+                                      className="input", debounce=True),
+                        ]),
+                    ]),
+                    html.Div(id="consumo-status", className="consumo-status"),
+                ]),
+            ]),
+
+            # ── Método B (tabla): 12 meses del recibo, kWh o $ ──
+            html.Div(id="wrap-demanda-tabla", style={"display": "none"}, children=[
+                html.Div(className="fin-tarifa", children=[
+                    html.Div(className="field", children=[
+                        html.Label("Captura cada mes en:"),
+                        dcc.RadioItems(
+                            id="tabla-unidad", className="radio-row",
+                            options=[
+                                {"label": " kWh / mes", "value": "kwh"},
+                                {"label": " $ / mes (recibo)", "value": "dinero"},
+                            ],
+                            value="kwh", inline=True,
+                        ),
+                    ]),
+                    dash_table.DataTable(
+                        id="tabla-demanda-12m",
+                        columns=[
+                            {"name": "Mes", "id": "mes", "editable": False},
+                            {"name": "kWh / mes", "id": "valor", "type": "numeric",
+                             "editable": True},
+                        ],
+                        data=[{"mes": MESES_ES_SHORT[i], "valor": KWH_MES_DEFAULT}
+                              for i in range(12)],
+                        editable=True,
+                        cell_selectable=True,
+                        style_as_list_view=True,
+                        style_table={"overflowX": "auto", "marginTop": "4px"},
+                        style_cell={
+                            "backgroundColor": "rgba(255,255,255,.02)",
+                            "color": "#e6e6e6",
+                            "border": "1px solid rgba(255,255,255,.08)",
+                            "fontFamily": "var(--mono)", "fontSize": "12.5px",
+                            "padding": "7px 12px", "textAlign": "left",
+                            "height": "34px",
+                        },
+                        # La columna editable se distingue con fondo tintado y un
+                        # candado visual; el mes va atenuado y no es editable.
+                        style_cell_conditional=[
+                            {"if": {"column_id": "mes"},
+                             "width": "42%", "color": "#9aa0a6",
+                             "textTransform": "uppercase", "fontSize": "11px"},
+                            {"if": {"column_id": "valor"},
+                             "width": "58%", "color": "#ffffff",
+                             "backgroundColor": "rgba(90,150,255,.08)"},
+                        ],
+                        # Celda activa/seleccionada: alto contraste para que SIEMPRE
+                        # se lea lo que se escribe (antes quedaba blanca sobre blanco).
+                        style_data_conditional=[
+                            {"if": {"state": "active"},
+                             "backgroundColor": "rgba(90,150,255,.28)",
+                             "border": "1px solid #5a96ff",
+                             "color": "#ffffff"},
+                            {"if": {"state": "selected"},
+                             "backgroundColor": "rgba(90,150,255,.28)",
+                             "border": "1px solid #5a96ff",
+                             "color": "#ffffff"},
+                        ],
+                        style_header={
+                            "backgroundColor": "rgba(255,255,255,.04)",
+                            "color": "#9aa0a6", "fontWeight": "500",
+                            "textTransform": "uppercase", "fontSize": "10.5px",
+                            "letterSpacing": ".06em",
+                        },
+                        # El <input> de edición hereda el tema oscuro: texto claro,
+                        # fondo tintado, alineado a la izquierda (no se va al borde).
+                        css=[
+                            {"selector": "td.dash-cell input.dash-cell-value",
+                             "rule": ("color:#ffffff !important;"
+                                      "background:rgba(90,150,255,.30) !important;"
+                                      "text-align:left !important;"
+                                      "font-family:var(--mono) !important;"
+                                      "caret-color:#7aa2ff !important;"
+                                      "padding:0 !important;")},
+                            {"selector": ".dash-spreadsheet-inner tr:hover td",
+                             "rule": ("background-color:rgba(90,150,255,.16) "
+                                      "!important; color:#ffffff !important;")},
+                            {"selector": ".dash-spreadsheet-inner tr:hover td "
+                                         ".dash-cell-value",
+                             "rule": "color:#ffffff !important;"},
+                        ],
+                    ),
+                    html.P("Haz clic en la columna de la derecha y escribe el "
+                           "consumo de cada mes.", className="tarifa-desc"),
+                    html.Div(id="tabla-status", className="consumo-status"),
+                ]),
+            ]),
+
+            # ── Modo Simple: resiliencia con lenguaje humano ──
+            html.Div(className="simple-only", children=[
+                html.Div(className="fin-tarifa", children=[
+                    html.Div(className="field", children=[
+                        html.Label("¿Tienes apagones?"),
+                        dcc.RadioItems(
+                            id="apagones-si-no", className="radio-row",
+                            options=[
+                                {"label": " No", "value": "no"},
+                                {"label": " Sí", "value": "si"},
+                            ],
+                            value="no", inline=True,
+                        ),
+                    ]),
+                    html.Div(id="wrap-apagon-critico", style={"display": "none"},
+                             children=[
+                        html.Div(className="field", children=[
+                            html.Label(["¿Cuánto duró tu apagón más crítico? ",
+                                        html.Span("h", className="hint")]),
+                            dcc.Input(id="inp-apagon-critico", type="number",
+                                      value=2, step=0.5, min=0,
+                                      className="input", debounce=True),
+                            html.P("Dimensionamos el almacenamiento para sostener "
+                                   "tu carga durante un evento de esa duración.",
+                                   className="tarifa-desc"),
+                        ]),
+                    ]),
+                ]),
+            ]),
+
+            # Costo de panel aplica en ambos modos; el costo de pila y los
+            # parámetros finos de apagón se reservan al Modo Avanzado.
             html.Div(className="fin-inputs", children=[
                 html.Div(className="field", children=[
                     html.Label(["Costo panel ", html.Span("MXN/m²", className="hint")]),
@@ -1253,30 +1596,45 @@ finance_page = html.Main(className="main", children=[
                               value=COSTO_PANEL_M2_DEFAULT, step=50, min=0,
                               className="input", debounce=True),
                 ]),
-                html.Div(className="field", children=[
+                html.Div(className="field adv-only", children=[
                     html.Label(["Costo pila ", html.Span("MXN/100kWh", className="hint")]),
                     dcc.Input(id="inp-costo-pila", type="number",
                               value=COSTO_PILA_DEFAULT, step=10000, min=0,
                               className="input", debounce=True),
                 ]),
-                html.Div(className="field", children=[
+                html.Div(className="field adv-only", children=[
                     html.Label(["Núm. apagones ", html.Span("/año", className="hint")]),
                     dcc.Input(id="inp-num-apagones", type="number",
                               value=NUM_APAGONES_DEFAULT, step=1, min=0,
                               className="input", debounce=True),
                 ]),
-                html.Div(className="field", children=[
+                html.Div(className="field adv-only", children=[
                     html.Label(["Duración apagón ", html.Span("h", className="hint")]),
                     dcc.Input(id="inp-dur-apagon", type="number",
                               value=DUR_APAGON_DEFAULT, step=0.5, min=0,
                               className="input", debounce=True),
                 ]),
-                html.Div(className="field", children=[
-                    html.Label(["Cap. respaldo ", html.Span("kWh", className="hint")]),
+                html.Div(className="field adv-only", children=[
+                    html.Label(["Respaldo deseado ", html.Span("kWh", className="hint")]),
                     dcc.Input(id="inp-cap-respaldo", type="number",
                               value=CAP_RESPALDO_DEFAULT, step=50, min=0,
                               className="input", debounce=True),
                 ]),
+            ]),
+
+            # ── Tipo de batería (vida útil por ciclos) · Modo Avanzado ──
+            html.Div(className="field adv-only", children=[
+                html.Label([
+                    "Tipo de batería ",
+                    html.Span("ⓘ valores estándar", className="hint",
+                              title=bateria_specs.tooltip_text()),
+                ]),
+                dcc.Dropdown(
+                    id="dd-bateria", className="dd-tarifa",
+                    options=bateria_specs.opciones_dropdown(),
+                    value=bateria_specs.BATERIA_DEFAULT, clearable=False,
+                ),
+                html.P("", id="bateria-rango", className="tarifa-desc"),
             ]),
 
             # ── Tarifa GDMTH manual + finanzas avanzadas (solo Modo Avanzado) ──
@@ -1287,8 +1645,8 @@ finance_page = html.Main(className="main", children=[
                     "Ajusta los precios por horario de la tarifa GDMTH y los "
                     "supuestos financieros. El VPN se calcula como una anualidad "
                     "creciente: el ahorro sube con la inflación y se descuenta a "
-                    "la tasa indicada a lo largo del horizonte de "
-                    f"{HORIZONTE_ANIOS} años.",
+                    "la tasa indicada a lo largo de los años de proyección que "
+                    "definas (por defecto 10).",
                 ]),
                 html.Div(className="fin-inputs", children=[
                     html.Div(className="field", children=[
@@ -1340,6 +1698,104 @@ finance_page = html.Main(className="main", children=[
                                   value=DESCUENTO_DEFAULT, step="any",
                                   className="input", debounce=True),
                     ]),
+                    html.Div(className="field", children=[
+                        html.Label(["Años de proyección ",
+                                    html.Span("años", className="hint")]),
+                        dcc.Input(id="inp-horizonte", type="number",
+                                  value=HORIZONTE_ANIOS, step=1, min=1, max=40,
+                                  className="input", debounce=True),
+                    ]),
+                ]),
+            ]),
+
+            # ── Capa opcional: cotización realista (solo Modo Avanzado) ──
+            html.Div(className="cot-block adv-only", children=[
+                html.Div(className="fin-divider",
+                         children="cotización realista (opcional)"),
+                html.Div(className="field", children=[
+                    dcc.Checklist(
+                        id="chk-cotizacion", className="radio-row",
+                        options=[{
+                            "label": " Incluir cotización realista "
+                                     "(pilas, instalación e interrupciones)",
+                            "value": "on"}],
+                        value=[],
+                    ),
+                    html.P("Suma el costo real del sistema y el valor de las "
+                           "interrupciones evitadas, para un ROI por pérdidas "
+                           "evitadas (no solo ahorro CFE).",
+                           className="tarifa-desc"),
+                ]),
+                html.Div(id="wrap-cotizacion", style={"display": "none"}, children=[
+                    # Origen del costo: estimado por $/kWh+BOS o costo total directo.
+                    html.Div(className="field", children=[
+                        html.Label("¿Cómo capturas el costo del sistema?"),
+                        dcc.RadioItems(
+                            id="cot-modo", className="radio-row",
+                            options=[
+                                {"label": " Estimar ($/kWh + instalación)",
+                                 "value": "desglose"},
+                                {"label": " Costo total del proyecto",
+                                 "value": "total"},
+                            ],
+                            value="desglose", inline=True,
+                        ),
+                    ]),
+                    # A) Estimación por $/kWh + BOS.
+                    html.Div(id="wrap-cot-desglose", className="fin-inputs", children=[
+                        html.Div(className="field", children=[
+                            html.Label(["Costo BESS instalado ",
+                                        html.Span("MXN/kWh", className="hint")]),
+                            dcc.Input(id="inp-costo-kwh-bess", type="number",
+                                      value=COSTO_KWH_BESS_DEFAULT, step=500, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Instalación / BOS ",
+                                        html.Span("%", className="hint")]),
+                            dcc.Input(id="inp-bos-pct", type="number",
+                                      value=BOS_PCT_DEFAULT, step=5, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                    ]),
+                    # B) Costo total directo (de una cotización del proveedor).
+                    html.Div(id="wrap-cot-total", style={"display": "none"},
+                             className="fin-inputs", children=[
+                        html.Div(className="field", children=[
+                            html.Label(["Costo total del proyecto ",
+                                        html.Span("MXN", className="hint")]),
+                            dcc.Input(id="inp-costo-total", type="number",
+                                      value=COSTO_TOTAL_DEFAULT, step=10000, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                    ]),
+                    html.P("«Estimar» calcula el CapEx desde la capacidad necesaria "
+                           "(batería+inversor+instalación) más el % BOS. «Costo "
+                           "total» usa directamente el monto de tu cotización.",
+                           className="tarifa-desc"),
+                    # Interrupciones (pérdidas evitadas) — aplican a ambos orígenes.
+                    html.Div(className="fin-inputs", children=[
+                        html.Div(className="field", children=[
+                            html.Label(["Apagones ", html.Span("/año", className="hint")]),
+                            dcc.Input(id="inp-cot-apagones", type="number",
+                                      value=COT_APAGONES_DEFAULT, step=1, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Horas por apagón ",
+                                        html.Span("h", className="hint")]),
+                            dcc.Input(id="inp-cot-horas", type="number",
+                                      value=COT_HORAS_DEFAULT, step=0.5, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Costo inactividad ",
+                                        html.Span("MXN/h", className="hint")]),
+                            dcc.Input(id="inp-cot-costo-hora", type="number",
+                                      value=COT_COSTO_HORA_DEFAULT, step=500, min=0,
+                                      className="input", debounce=True),
+                        ]),
+                    ]),
                 ]),
             ]),
 
@@ -1379,6 +1835,7 @@ finance_page = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("fin-graph-bill"),
                 dcc.Graph(id="fin-graph-bill", figure=empty_fig("Ejecuta el análisis"),
                           config={"displayModeBar": False},
                           style={"height": "280px", "width": "100%"}),
@@ -1392,6 +1849,7 @@ finance_page = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("fin-graph-curtail"),
                 dcc.Graph(id="fin-graph-curtail", figure=empty_fig("Ejecuta el análisis"),
                           config={"displayModeBar": False},
                           style={"height": "280px", "width": "100%"}),
@@ -1415,6 +1873,7 @@ finance_page = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("fin-graph-energy"),
                 dcc.Graph(id="fin-graph-energy", figure=empty_fig("Ejecuta el análisis"),
                           config={"displayModeBar": False},
                           style={"height": "300px", "width": "100%"}),
@@ -1441,6 +1900,7 @@ finance_page = html.Main(className="main", children=[
                 ]),
             ]),
             html.Div(className="chart-wrap", children=[
+                chart_dl_btn("fin-graph-payback"),
                 dcc.Graph(id="fin-graph-payback",
                           figure=empty_fig("Ejecuta el análisis"),
                           config={"displayModeBar": False},
@@ -1485,10 +1945,81 @@ finance_page = html.Main(className="main", children=[
                     html.P("Demanda, factor de potencia y total CFE estimado por mes",
                            className="card-sub"),
                 ]),
+                html.Button(id="btn-download-recibo", className="mode-btn",
+                            n_clicks=0, children=[html.Span("Descargar Excel")]),
             ]),
             html.Div(id="fin-table-sis", className="fin-table-wrap", children=[
                 html.Div("Ejecuta el análisis para ver el detalle.",
                          className="rec-empty"),
+            ]),
+        ]),
+
+        # ── Reporte imprimible ──
+        html.Div(className="card col-12 row-gap-14", id="fin-report-card", children=[
+            html.Div(className="card-head", children=[
+                html.Div(className="card-titlewrap", children=[
+                    html.H3("Reporte del proyecto", className="card-title"),
+                    html.P("Resumen imprimible con gráficas · usa «Imprimir / PDF» "
+                           "y elige «Guardar como PDF» en el navegador",
+                           className="card-sub"),
+                ]),
+                html.Button(id="btn-report", className="mode-btn", n_clicks=0,
+                            children=[html.Span("Imprimir / PDF")]),
+            ]),
+            html.Div(id="fin-report", children=[
+                html.Div("Ejecuta el análisis para generar el reporte.",
+                         className="rec-empty"),
+            ]),
+            # Gráficas más relevantes para el reporte (se imprimen con el texto).
+            html.Div(className="report-charts", children=[
+                html.Div(className="report-group-h", children="Generación solar"),
+                html.Div(className="report-chart", children=[
+                    html.H4("Generación mensual", className="report-h"),
+                    dcc.Graph(id="report-graph-solar-monthly",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
+                html.Div(className="report-chart", children=[
+                    html.H4("Generación diaria (año)", className="report-h"),
+                    dcc.Graph(id="report-graph-solar-daily",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
+                html.Div(className="report-chart", children=[
+                    html.H4("Irradiancia · GHI vs POA (días representativos)",
+                            className="report-h"),
+                    dcc.Graph(id="report-graph-solar-irr",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
+                html.Div(className="report-group-h", children="Finanzas"),
+                html.Div(className="report-chart", children=[
+                    html.H4("Recibo CFE mensual · base vs sistema",
+                            className="report-h"),
+                    dcc.Graph(id="report-graph-bill",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
+                html.Div(className="report-chart", children=[
+                    html.H4("Energía mensual · demanda, red y solar",
+                            className="report-h"),
+                    dcc.Graph(id="report-graph-energy",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
+                html.Div(className="report-chart", children=[
+                    html.H4("Recuperación de la inversión · VPN acumulado",
+                            className="report-h"),
+                    dcc.Graph(id="report-graph-payback",
+                              figure=empty_fig("Ejecuta el análisis"),
+                              config={"displayModeBar": False},
+                              style={"height": "260px", "width": "100%"}),
+                ]),
             ]),
         ]),
     ]),
@@ -1512,7 +2043,11 @@ app.layout = html.Div([
     dcc.Store(id="dummy-tilt"),
     dcc.Store(id="dummy-az"),
     dcc.Store(id="dummy-mode"),
+    dcc.Store(id="dummy-print"),
+    dcc.Store(id="store-recibo"),
     dcc.Download(id="download-csv"),
+    dcc.Download(id="download-xlsx"),
+    dcc.Download(id="download-graph-xls"),
     landing,
     html.Div(id="app", children=[
         topbar,
@@ -1684,6 +2219,60 @@ clientside_callback(
 )
 
 
+# Especificación del panel (clientside, instant): Wp = area · η · 1000 W/m²
+clientside_callback(
+    """
+    function(n, area, eff) {
+        const panels = Math.max(1, parseInt(n) || 1);
+        const a = parseFloat(area) || 0;
+        const e = parseFloat(eff) || 0;
+        const wp = Math.round(a * e * 1000);
+        const kwp = (panels * a * e).toFixed(2);
+        return 'Panel: ' + wp + ' Wp · ' + a.toFixed(1) + ' m² · η ' +
+               Math.round(e * 100) + '% · ' + kwp + ' kWp';
+    }
+    """,
+    Output("stc-power-display", "children"),
+    Input("inp-n-panels", "value"),
+    Input("inp-area", "value"),
+    Input("inp-eff", "value"),
+)
+
+
+# Sync bidireccional Potencia nominal (Wp) ↔ eficiencia η, mediado por el área.
+# Permite personalizar el panel por su potencia nominal en Modo Avanzado sin
+# tocar el motor (que sigue usando η). Wp = η · área · 1000.
+clientside_callback(
+    """
+    function(pnom, eff, area) {
+        const ctx = window.dash_clientside.callback_context;
+        const nu = window.dash_clientside.no_update;
+        if (!ctx.triggered.length) return [nu, nu];
+        const a = parseFloat(area) || 0;
+        if (a <= 0) return [nu, nu];
+        const trig = ctx.triggered[0].prop_id;
+        if (trig.indexOf('inp-pnom') === 0) {
+            const p = parseFloat(pnom);
+            if (isNaN(p)) return [nu, nu];
+            const e = Math.round((p / (a * 1000)) * 10000) / 10000;
+            return [nu, (parseFloat(eff) === e) ? nu : e];
+        } else {
+            const e = parseFloat(eff);
+            if (isNaN(e)) return [nu, nu];
+            const p = Math.round(e * a * 1000);
+            return [(parseFloat(pnom) === p) ? nu : p, nu];
+        }
+    }
+    """,
+    Output("inp-pnom", "value", allow_duplicate=True),
+    Output("inp-eff", "value", allow_duplicate=True),
+    Input("inp-pnom", "value"),
+    Input("inp-eff", "value"),
+    Input("inp-area", "value"),
+    prevent_initial_call=True,
+)
+
+
 # Mode toggle: Simple ↔ Avanzado (alterna la clase del body)
 clientside_callback(
     """
@@ -1704,7 +2293,7 @@ clientside_callback(
 clientside_callback(
     """
     function(eff,pr,fp,tamb,gamma,noct,soil,wire,inv,degr,yr,iam,alt) {
-        const d = {eff:0.21,pr:0.82,fp:1.0,tamb:25,gamma:-0.40,noct:45,
+        const d = {eff:0.22,pr:0.82,fp:1.0,tamb:25,gamma:-0.40,noct:45,
                    soil:3,wire:2,inv:97,degr:0.5,yr:0,alt:540};
         let diff = (+eff!==d.eff)||(+pr!==d.pr)||(+fp!==d.fp)||(+tamb!==d.tamb)||
                    (+gamma!==d.gamma)||(+noct!==d.noct)||(+soil!==d.soil)||
@@ -1734,6 +2323,128 @@ clientside_callback(
     Output("wrap-kwh", "style"),
     Output("wrap-recibo", "style"),
     Input("consumo-modo", "value"),
+)
+
+
+# Método de demanda: mostrar solo el bloque del método elegido (excluyentes).
+# La tarifa se comparte entre "rápido" y "tabla" (no aplica al CSV).
+clientside_callback(
+    """
+    function(metodo) {
+        const show = function(v){ return v ? {display:'block'} : {display:'none'}; };
+        return [ show(metodo === 'csv'),
+                 show(metodo === 'rapido'),
+                 show(metodo === 'tabla'),
+                 show(metodo === 'rapido' || metodo === 'tabla') ];
+    }
+    """,
+    Output("wrap-demanda-csv", "style"),
+    Output("wrap-demanda-rapido", "style"),
+    Output("wrap-demanda-tabla", "style"),
+    Output("wrap-demanda-tarifa", "style"),
+    Input("demanda-metodo", "value"),
+)
+
+
+# Subtarifa doméstica: visible solo cuando la familia es doméstica.
+clientside_callback(
+    """
+    function(familia) {
+        return familia === 'domestica'
+            ? {display:'block'} : {display:'none'};
+    }
+    """,
+    Output("wrap-subtarifa", "style"),
+    Input("dd-tarifa", "value"),
+)
+
+
+# Tabla 12 meses: el encabezado de la columna editable refleja la unidad activa.
+clientside_callback(
+    """
+    function(unidad) {
+        var lbl = unidad === 'dinero' ? '$ / mes' : 'kWh / mes';
+        return [ {name:'Mes', id:'mes', editable:false},
+                 {name:lbl, id:'valor', type:'numeric', editable:true} ];
+    }
+    """,
+    Output("tabla-demanda-12m", "columns"),
+    Input("tabla-unidad", "value"),
+)
+
+
+# Cotización realista: revelar los campos solo si la casilla está marcada.
+clientside_callback(
+    """
+    function(val) {
+        var on = Array.isArray(val) && val.indexOf('on') !== -1;
+        return on ? {display:'block'} : {display:'none'};
+    }
+    """,
+    Output("wrap-cotizacion", "style"),
+    Input("chk-cotizacion", "value"),
+)
+
+
+# Cotización: alternar entre estimación ($/kWh + BOS) y costo total directo.
+clientside_callback(
+    """
+    function(modo) {
+        var show = {}, hide = {display:'none'};
+        return [ modo === 'total' ? hide : show,
+                 modo === 'total' ? show : hide ];
+    }
+    """,
+    Output("wrap-cot-desglose", "style"),
+    Output("wrap-cot-total", "style"),
+    Input("cot-modo", "value"),
+)
+
+
+# Botón de reporte: dispara la impresión del navegador (Guardar como PDF).
+clientside_callback(
+    """
+    function(n) {
+        if (n) {
+            // Forzar a Plotly a recalcular tamaño antes de imprimir las gráficas.
+            window.dispatchEvent(new Event('resize'));
+            setTimeout(function(){ window.print(); }, 300);
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("dummy-print", "data"),
+    Input("btn-report", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+
+# Apagones (Modo Simple): revelar la duración crítica solo si responde "Sí"
+clientside_callback(
+    """
+    function(resp) {
+        return resp === 'si' ? {display:'block'} : {display:'none'};
+    }
+    """,
+    Output("wrap-apagon-critico", "style"),
+    Input("apagones-si-no", "value"),
+)
+
+
+# Fuente de irradiancia: actualizar la pista descriptiva
+clientside_callback(
+    """
+    function(src) {
+        if (src === 'tmy') {
+            return 'Datos meteorológicos reales con nubosidad (PVGIS). ' +
+                   'Requiere internet; si falla, usa cielo claro. ' +
+                   'La cascada de pérdidas avanzada no aplica con TMY.';
+        }
+        return 'Modelo de cielo despejado (optimista, determinista).';
+    }
+    """,
+    Output("src-irr-hint", "children"),
+    Input("src-irr", "value"),
 )
 
 
@@ -1778,12 +2489,22 @@ def sync_landing_meta(lat, lon, tz):
     Output("tarifa-desc", "children"),
     Output("tarifa-fecha", "children"),
     Input("dd-tarifa", "value"),
+    Input("dd-subtarifa", "value"),
 )
-def tarifa_info(tid):
+def tarifa_info(familia, subtarifa):
+    tid = tarifas_cfe.tarifa_efectiva(familia, subtarifa)
     t = tarifas_cfe.TARIFAS.get(tid)
     if not t:
         return "", ""
     return t["descripcion"], t.get("actualizado", "")
+
+
+@callback(
+    Output("bateria-rango", "children"),
+    Input("dd-bateria", "value"),
+)
+def bateria_info(bid):
+    return bateria_specs.spec(bid)["rango"]
 
 
 @callback(
@@ -1813,35 +2534,88 @@ def map_click(click):
     Output("store-demand", "data", allow_duplicate=True),
     Output("consumo-status", "children"),
     Output("consumo-status", "className"),
+    Input("demanda-metodo", "value"),
     Input("consumo-modo", "value"),
-    Input("inp-kwh-dia", "value"),
+    Input("inp-kwh-mes", "value"),
     Input("inp-recibo-mes", "value"),
     Input("dd-tarifa", "value"),
+    Input("dd-subtarifa", "value"),
     prevent_initial_call=True,
 )
-def gen_demand_profile(modo, kwh_dia, recibo, tarifa):
-    """Genera un perfil de demanda sintético (Modo Simple) → store-demand.
+def gen_demand_profile(metodo, modo, kwh_mes, recibo, familia, subtarifa):
+    """Genera un perfil de demanda sintético (estimador rápido) → store-demand.
 
     Alimenta el mismo store que usa el análisis financiero, de modo que el
-    usuario no experto no necesita subir un CSV.
+    usuario no experto no necesita subir un CSV. Solo aplica cuando el método
+    de captura activo es "rapido"; con CSV o tabla, el perfil lo escriben sus
+    propios callbacks y no debemos sobrescribirlo.
     """
     try:
+        if metodo != "rapido":
+            return no_update, no_update, no_update
+        tarifa = tarifas_cfe.tarifa_efectiva(familia, subtarifa)
         if modo == "recibo":
             # Campo aún vacío: no es un error, solo esperamos un valor válido.
             if recibo is None or recibo == "":
                 return no_update, no_update, no_update
-            # GDMTH no se invierte aquí (usa CSV + motor financiero); para la
-            # estimación simple aproximamos con la estructura horaria HM.
-            tarifa_inv = "HM" if tarifa == "GDMTH" else tarifa
-            kwh = tarifas_cfe.kwh_dia_desde_recibo(recibo, tarifa_inv)
+            kwh_mes_val = tarifas_cfe.kwh_mes_desde_costo(recibo, tarifa)
         else:
-            if kwh_dia is None or kwh_dia == "":
+            if kwh_mes is None or kwh_mes == "":
                 return no_update, no_update, no_update
-            kwh = float(kwh_dia)
-        df = perfil_demanda.generar_perfil(kwh, "residencial")
+            kwh_mes_val = float(kwh_mes)
+        kwh_dia = kwh_mes_val / 30.4
+        df = perfil_demanda.generar_perfil(kwh_dia, "residencial")
         store = df.to_json(orient="split", date_format="iso")
         anual = perfil_demanda.consumo_anual_kwh(df)
-        msg = f"✓ Perfil generado · {kwh:.1f} kWh/día · {anual:,.0f} kWh/año"
+        msg = (f"✓ Perfil generado · {kwh_mes_val:,.0f} kWh/mes · "
+               f"{anual:,.0f} kWh/año")
+        return store, msg, "consumo-status ok"
+    except Exception as exc:
+        return no_update, f"✕ {exc}", "consumo-status err"
+
+
+@callback(
+    Output("store-demand", "data", allow_duplicate=True),
+    Output("tabla-status", "children"),
+    Output("tabla-status", "className"),
+    Input("demanda-metodo", "value"),
+    Input("tabla-demanda-12m", "data"),
+    Input("tabla-unidad", "value"),
+    Input("dd-tarifa", "value"),
+    Input("dd-subtarifa", "value"),
+    prevent_initial_call=True,
+)
+def gen_demand_from_table(metodo, rows, unidad, familia, subtarifa):
+    """Construye el perfil 15-min desde la tabla editable de 12 meses.
+
+    Respeta el consumo de cada mes (estacionalidad). Si la tabla está en $/mes,
+    invierte cada celda a kWh con la tarifa vigente del mes correspondiente.
+    Solo aplica cuando el método de captura activo es "tabla".
+    """
+    try:
+        if metodo != "tabla":
+            return no_update, no_update, no_update
+        valores = []
+        for i in range(12):
+            v = rows[i].get("valor") if rows and i < len(rows) else None
+            try:
+                valores.append(float(v))
+            except (TypeError, ValueError):
+                valores.append(0.0)
+        tarifa = tarifas_cfe.tarifa_efectiva(familia, subtarifa)
+        if unidad == "dinero":
+            kwh_por_mes = [
+                (tarifas_cfe.kwh_mes_desde_costo(c, tarifa, mes=i + 1)
+                 if c and c > 0 else 0.0)
+                for i, c in enumerate(valores)
+            ]
+        else:
+            kwh_por_mes = valores
+        df = perfil_demanda.generar_perfil_mensual(kwh_por_mes, "residencial")
+        store = df.to_json(orient="split", date_format="iso")
+        anual = perfil_demanda.consumo_anual_kwh(df)
+        unit_lbl = "$/mes" if unidad == "dinero" else "kWh/mes"
+        msg = f"✓ Perfil de 12 meses ({unit_lbl}) · {anual:,.0f} kWh/año"
         return store, msg, "consumo-status ok"
     except Exception as exc:
         return no_update, f"✕ {exc}", "consumo-status err"
@@ -1888,11 +2662,12 @@ def gen_demand_profile(modo, kwh_dia, recibo, tarifa):
     State("inp-degr", "value"),
     State("inp-year-idx", "value"),
     State("chk-iam", "value"),
+    State("src-irr", "value"),
     prevent_initial_call=True,
 )
 def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr,
                     ui_mode, tamb, gamma, noct, soiling, wiring, eta_inv,
-                    degr, year_idx, iam):
+                    degr, year_idx, iam, src):
     blank = empty_fig()
     try:
         if lat is None or lon is None or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
@@ -1909,27 +2684,45 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         modo = ui_mode or "simple"
         tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
         perdidas = None
-        if modo == "avanzado":
-            df, perdidas = calculate_advanced(
-                lat, lon, float(alt), tz_motor,
-                float(tilt), float(azimuth), total_area, float(eff), float(pr),
-                tamb=float(tamb) if tamb is not None else 25.0,
-                gamma_pmax=(float(gamma) / 100.0) if gamma is not None else -0.0040,
-                noct=float(noct) if noct is not None else 45.0,
-                soiling=(float(soiling) / 100.0) if soiling is not None else 0.03,
-                wiring_loss=(float(wiring) / 100.0) if wiring is not None else 0.02,
-                eta_inv=(float(eta_inv) / 100.0) if eta_inv is not None else 0.97,
-                degradation=(float(degr) / 100.0) if degr is not None else 0.005,
-                year_index=int(year_idx) if year_idx else 0,
-                use_iam=bool(iam),
-            )
-            store_cols = ["ghi", "poa_global", "potencia_generada",
-                          "dni", "dhi", "solar_elevation"]
-        else:
-            df = calculate(lat, lon, float(alt), tz_motor,
-                           float(tilt), float(azimuth),
-                           total_area, float(eff), float(pr))
-            store_cols = ["ghi", "poa_global", "potencia_generada"]
+        fuente = src or "clearsky"
+        usar_tmy = (fuente == "tmy")
+        tmy_fallback = False
+
+        # ── Fuente de irradiancia: TMY real (PVGIS) con fallback a cielo claro ──
+        if usar_tmy:
+            try:
+                df = calculate_tmy(lat, lon, float(alt), tz_motor,
+                                   float(tilt), float(azimuth),
+                                   total_area, float(eff), float(pr))
+                # TMY trae dni/dhi/elevación reales; sin cascada de pérdidas.
+                store_cols = ["ghi", "poa_global", "potencia_generada",
+                              "dni", "dhi", "solar_elevation"]
+            except TMYUnavailable:
+                usar_tmy = False
+                tmy_fallback = True  # degradar con gracia a cielo claro
+
+        if not usar_tmy:
+            if modo == "avanzado":
+                df, perdidas = calculate_advanced(
+                    lat, lon, float(alt), tz_motor,
+                    float(tilt), float(azimuth), total_area, float(eff), float(pr),
+                    tamb=float(tamb) if tamb is not None else 25.0,
+                    gamma_pmax=(float(gamma) / 100.0) if gamma is not None else -0.0040,
+                    noct=float(noct) if noct is not None else 45.0,
+                    soiling=(float(soiling) / 100.0) if soiling is not None else 0.03,
+                    wiring_loss=(float(wiring) / 100.0) if wiring is not None else 0.02,
+                    eta_inv=(float(eta_inv) / 100.0) if eta_inv is not None else 0.97,
+                    degradation=(float(degr) / 100.0) if degr is not None else 0.005,
+                    year_index=int(year_idx) if year_idx else 0,
+                    use_iam=bool(iam),
+                )
+                store_cols = ["ghi", "poa_global", "potencia_generada",
+                              "dni", "dhi", "solar_elevation"]
+            else:
+                df = calculate(lat, lon, float(alt), tz_motor,
+                               float(tilt), float(azimuth),
+                               total_area, float(eff), float(pr))
+                store_cols = ["ghi", "poa_global", "potencia_generada"]
 
         energia_kwh = df["energia_generada_kWh"].sum()
         pico_w = df["potencia_generada"].max()
@@ -1970,8 +2763,14 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
         losses_json = json.dumps(perdidas) if perdidas is not None else None
 
         modo_lbl = "avanzado · física detallada" if modo == "avanzado" else "simple"
+        if usar_tmy:
+            fuente_lbl = "TMY real (PVGIS)"
+        elif tmy_fallback:
+            fuente_lbl = "cielo claro (TMY no disponible — sin red)"
+        else:
+            fuente_lbl = "cielo claro (Ineichen)"
         page_sub = (f"{n} paneles · {total_area:.1f} m² · η {eff} · PR {pr} "
-                    f"a {lat:.2f}°, {lon:.2f}° · modo {modo_lbl}.")
+                    f"a {lat:.2f}°, {lon:.2f}° · modo {modo_lbl} · {fuente_lbl}.")
 
         store_meta = {"num_paneles": n, "area": float(area),
                       "total_area": total_area}
@@ -1989,6 +2788,45 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
                 "—", "—", "—",
                 None, None, None, "alert", str(exc),
                 "Ejecuta el cálculo para ver los resultados.")
+
+
+@callback(
+    Output("graph-dia-irr", "figure"),
+    Output("graph-dia-pot", "figure"),
+    Input("dia-tipico-sel", "value"),
+    Input("sld-tilt", "value"),
+    Input("sld-azimuth", "value"),
+    Input("inp-lat", "value"),
+    Input("inp-lon", "value"),
+    Input("inp-alt", "value"),
+    Input("inp-eff", "value"),
+    Input("inp-area", "value"),
+    State("inp-tz", "value"),
+    prevent_initial_call=False,
+)
+def update_dia_tipico(dia, tilt, azimuth, lat, lon, alt, eff, area, tz):
+    """Diagnóstico instantáneo: 1 panel en un día típico (cielo claro).
+
+    Reacciona en vivo a tilt/azimut y a la ubicación, sin correr la simulación
+    anual. Cómputo de ~96 puntos (decenas de ms en caliente).
+    """
+    try:
+        lat = float(lat) if lat is not None else LAT_DEFAULT
+        lon = float(lon) if lon is not None else LON_DEFAULT
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            raise ValueError("Lat/Lon fuera de rango.")
+        alt = float(alt) if alt is not None and alt >= 0 else ALT_DEFAULT
+        eff = float(eff) if eff is not None and 0 < eff <= 1 else EFF_DEFAULT
+        area = float(area) if area is not None and area > 0 else AREA_DEFAULT
+        tilt = float(tilt) if tilt is not None else TILT_DEFAULT
+        azimuth = float(azimuth) if azimuth is not None else AZ_DEFAULT
+        tz_motor = _tz_para_motor(tz or TZ_DEFAULT)
+        df = dia_tipico(lat, lon, alt, tz_motor, tilt, azimuth, area, eff,
+                        dia=dia or DIA_TIPICO_DEFAULT)
+        return build_dia_tipico_irr_fig(df), build_dia_tipico_pot_fig(df)
+    except Exception as exc:
+        e = empty_fig(f"Día típico no disponible: {exc}")
+        return e, e
 
 
 @callback(
@@ -2140,6 +2978,50 @@ def download_csv(_, stored, fp_val):
     return dcc.send_data_frame(df_out.to_csv, "kardashev_15min.csv", index=False)
 
 
+@callback(
+    Output("download-xlsx", "data"),
+    Input("btn-download-recibo", "n_clicks"),
+    State("store-recibo", "data"),
+    prevent_initial_call=True,
+)
+def download_recibo_xlsx(_, stored):
+    """Exporta el recibo mensual detallado (con sistema) a un archivo Excel."""
+    if not stored:
+        return no_update
+    df = pd.read_json(StringIO(stored), orient="split")
+    return dcc.send_data_frame(df.to_excel, "recibo_mensual_detallado.xlsx",
+                               sheet_name="Recibo", index=False)
+
+
+# Gráficas con exportación a Excel (su figura es la fuente de datos).
+EXPORT_GRAPH_IDS = [
+    "graph-dia-irr", "graph-dia-pot", "graph-timeseries", "graph-monthly",
+    "graph-irradiance", "graph-energy-15min", "graph-decomp", "graph-waterfall",
+    "fin-graph-bill", "fin-graph-curtail", "fin-graph-energy", "fin-graph-payback",
+]
+
+
+@callback(
+    Output("download-graph-xls", "data"),
+    Input({"type": "dl-graph", "index": ALL}, "n_clicks"),
+    [State(g, "figure") for g in EXPORT_GRAPH_IDS],
+    prevent_initial_call=True,
+)
+def export_graph_xls(n_clicks_list, *figures):
+    """Exporta a Excel los datos de la gráfica cuyo botón se pulsó."""
+    if not n_clicks_list or not any(n_clicks_list):
+        return no_update
+    trig = ctx.triggered_id
+    gid = trig.get("index") if isinstance(trig, dict) else None
+    if not gid:
+        return no_update
+    df = figure_to_df(dict(zip(EXPORT_GRAPH_IDS, figures)).get(gid))
+    if df is None or df.empty:
+        return no_update
+    fname = gid.replace("graph-", "").replace("fin-", "fin_") + ".xlsx"
+    return dcc.send_data_frame(df.to_excel, fname, sheet_name="Datos", index=False)
+
+
 # ───────────────────────── Routing ─────────────────────────────────────────────
 @callback(
     Output("page-sim", "style"),
@@ -2210,6 +3092,14 @@ def parse_demand(contents, filename):
     Output("fin-recommendations", "children"),
     Output("fin-capex-summary", "children"),
     Output("fin-table-sis", "children"),
+    Output("fin-report", "children"),
+    Output("report-graph-solar-monthly", "figure"),
+    Output("report-graph-solar-daily", "figure"),
+    Output("report-graph-solar-irr", "figure"),
+    Output("report-graph-bill", "figure"),
+    Output("report-graph-energy", "figure"),
+    Output("report-graph-payback", "figure"),
+    Output("store-recibo", "data"),
     Output("fin-error-alert", "className"),
     Output("fin-error-msg", "children"),
     Input("btn-fin-run", "n_clicks"),
@@ -2221,6 +3111,9 @@ def parse_demand(contents, filename):
     State("inp-num-apagones", "value"),
     State("inp-dur-apagon", "value"),
     State("inp-cap-respaldo", "value"),
+    State("dd-bateria", "value"),
+    State("apagones-si-no", "value"),
+    State("inp-apagon-critico", "value"),
     State("ui-mode", "data"),
     State("inp-precio-base", "value"),
     State("inp-precio-int", "value"),
@@ -2229,22 +3122,38 @@ def parse_demand(contents, filename):
     State("inp-cargo-dist", "value"),
     State("inp-inflacion", "value"),
     State("inp-descuento", "value"),
+    State("inp-horizonte", "value"),
+    State("chk-cotizacion", "value"),
+    State("cot-modo", "value"),
+    State("inp-costo-kwh-bess", "value"),
+    State("inp-bos-pct", "value"),
+    State("inp-costo-total", "value"),
+    State("inp-cot-apagones", "value"),
+    State("inp-cot-horas", "value"),
+    State("inp-cot-costo-hora", "value"),
     prevent_initial_call=True,
 )
 def run_financial(_, store_df, store_meta, store_demand,
                   costo_panel, costo_pila, num_apagones, dur_apagon, cap_respaldo,
+                  bateria, apagones_si_no, apagon_critico,
                   ui_mode, precio_base, precio_int, precio_punta,
-                  cargo_cap, cargo_dist, inflacion, descuento):
+                  cargo_cap, cargo_dist, inflacion, descuento, horizonte_val,
+                  chk_cotizacion, cot_modo, costo_kwh_bess, bos_pct, costo_total,
+                  cot_apagones, cot_horas, cot_costo_hora):
     blank = empty_fig()
     dash_vals = ["—"] * 5
     foots = [""] * 5
     empty_recs = [html.Div("Ejecuta el análisis.", className="rec-empty")]
     empty_summary = [html.Div("—", className="rec-empty")]
     empty_table = [html.Div("Sin datos.", className="rec-empty")]
+    empty_report = [html.Div("Ejecuta el análisis para generar el reporte.",
+                             className="rec-empty")]
 
     def err(msg):
         return (*dash_vals, *foots, blank, blank, blank, blank,
-                empty_recs, empty_summary, empty_table, "alert", msg)
+                empty_recs, empty_summary, empty_table, empty_report,
+                blank, blank, blank, blank, blank, blank, None,
+                "alert", msg)
 
     try:
         if not store_df or not store_meta:
@@ -2261,6 +3170,33 @@ def run_financial(_, store_df, store_meta, store_demand,
 
         num_paneles = int(store_meta.get("num_paneles", 1))
         area = float(store_meta.get("area", 1.0))
+
+        # Horizonte de proyección (años): configurable en Modo Avanzado; en
+        # Simple usa el default. Afecta flujo de caja, VPN, ROI y reemplazos.
+        horizonte = HORIZONTE_ANIOS
+        if (ui_mode or "simple") == "avanzado" and horizonte_val:
+            try:
+                horizonte = max(1, min(40, int(float(horizonte_val))))
+            except (TypeError, ValueError):
+                horizonte = HORIZONTE_ANIOS
+
+        # ── Resiliencia según el modo ──
+        # Avanzado: el usuario controla nº de apagones, duración y respaldo.
+        # Simple: pregunta humana ("¿tienes apagones?" + duración crítica) →
+        #   un único evento de esa duración dimensiona el banco; sin apagones
+        #   no se pide respaldo (autoconsumo directo, 0 pilas).
+        if (ui_mode or "simple") == "avanzado":
+            n_apagones = int(num_apagones or 0)
+            dur_ap = float(dur_apagon or 1.0)
+            cap_resp = float(cap_respaldo or 0)
+        elif apagones_si_no == "si" and apagon_critico:
+            n_apagones = 1
+            dur_ap = float(apagon_critico)
+            cap_resp = 0.0
+        else:
+            n_apagones = 0
+            dur_ap = 1.0
+            cap_resp = 0.0
 
         # En Modo Avanzado se aplican las tarifas e inflación personalizadas;
         # en Simple se usan los valores fijos del motor (None → defaults).
@@ -2280,9 +3216,10 @@ def run_financial(_, store_df, store_meta, store_demand,
             num_paneles=num_paneles, area=area,
             costo_panel_m2=float(costo_panel or 0),
             costo_pila=float(costo_pila or 0),
-            cap_respaldo_max_kwh=float(cap_respaldo or 0),
-            num_apagones=int(num_apagones or 0),
-            duracion_horas_apagon=float(dur_apagon or 1.0),
+            cap_respaldo_max_kwh=cap_resp,
+            num_apagones=n_apagones,
+            duracion_horas_apagon=dur_ap,
+            horizonte=horizonte,
             **kw,
         )
 
@@ -2296,7 +3233,7 @@ def run_financial(_, store_df, store_meta, store_demand,
                       html.Span("k MXN/año", className="u")]
         kpi_curtail = [f"{res['pct_desperdicio']:.1f}", html.Span("%", className="u")]
 
-        foot_roi = f"horizonte {HORIZONTE_ANIOS} años"
+        foot_roi = f"horizonte {horizonte} años"
         foot_payback = ("no se recupera" if payback == float("inf")
                         else "recuperación simple")
         foot_npv = "valor presente neto"
@@ -2311,22 +3248,118 @@ def run_financial(_, store_df, store_meta, store_demand,
 
         recs = build_recommendations(res["recomendaciones"])
 
-        summary = html.Div(className="fin-summary-grid", children=[
+        adv = (ui_mode or "simple") == "avanzado"
+
+        # Vida útil de la batería por ciclos (química elegida + throughput real
+        # de descarga que reporta el motor).
+        vida = bateria_specs.estimar_vida(
+            bateria, res["sizing_diario_requerido"],
+            res["descarga_total_kwh"], horizonte)
+
+        # Almacenamiento como protagonista (capacidad necesaria, dato físico
+        # siempre válido). El costo de pilas y el CapEx detallado se reservan al
+        # Modo Avanzado / capa de cotización, para no mezclar física y precio.
+        summary_rows = [
             _summ_row("Paneles", f"{num_paneles} uds · {num_paneles*area:.1f} m²"),
-            _summ_row("Costo paneles", f"${res['costo_total_paneles']:,.0f}"),
-            _summ_row("Banco diario", f"{res['sizing_diario_requerido']:,.0f} kWh"),
-            _summ_row("Pilas", f"{res['cant_pilas']} uds"),
-            _summ_row("Costo pilas", f"${res['costo_total_pilas']:,.0f}"),
-            _summ_row("CapEx total", f"${res['capex']:,.0f}", strong=True),
+            _summ_row("Almacenamiento necesario",
+                      f"{res['sizing_diario_requerido']:,.0f} kWh", strong=True),
+            _summ_row("Pilas (referencia)", f"{res['cant_pilas']} uds"),
             _summ_row("Solar generada", f"{res['total_generada']:,.0f} kWh/año"),
-        ])
+        ]
+        if adv:
+            summary_rows += [
+                _summ_row("Batería", vida["nombre"]),
+                _summ_row("Ciclos equiv./año", f"{vida['ciclos_por_anio']:.0f}"),
+                _summ_row("Vida útil estimada", _vida_str(vida)),
+                _summ_row("Reemplazos (horizonte)", f"{vida['reemplazos']}"),
+                _summ_row("Costo paneles", f"${res['costo_total_paneles']:,.0f}"),
+                _summ_row("Costo pilas", f"${res['costo_total_pilas']:,.0f}"),
+                _summ_row("CapEx total", f"${res['capex']:,.0f}", strong=True),
+            ]
+        # ── Capa opcional: cotización realista (solo Modo Avanzado) ──
+        cot_on = (adv and isinstance(chk_cotizacion, (list, tuple))
+                  and "on" in chk_cotizacion)
+        cot = None
+        if cot_on:
+            # Tasas del modelo de valor presente (mismas que el motor).
+            infl = (float(inflacion) / 100.0 if inflacion is not None
+                    else TASA_INFLACION_DEFAULT)
+            desc = (float(descuento) / 100.0 if descuento is not None
+                    else TASA_DESCUENTO_DEFAULT)
+            # Origen del CapEx: estimado ($/kWh + BOS) o costo total directo.
+            if cot_modo == "total":
+                capex_real = float(costo_total or 0)
+                costo_paneles = costo_bess = costo_bos = None
+            else:
+                capacidad_kwh = res["sizing_diario_requerido"]
+                costo_bess = capacidad_kwh * float(costo_kwh_bess or 0)
+                costo_paneles = res["costo_total_paneles"]
+                equipo = costo_paneles + costo_bess
+                capex_real = equipo * (1.0 + float(bos_pct or 0) / 100.0)
+                costo_bos = capex_real - equipo
+            # Reemplazos de batería dentro del horizonte → costo en valor presente
+            # (cada reemplazo ocurre al cumplirse la vida útil estimada).
+            costo_bateria_unit = (res["sizing_diario_requerido"]
+                                  * float(costo_kwh_bess or 0))
+            costo_reemplazos = 0.0
+            for k in range(1, vida["reemplazos"] + 1):
+                t_rep = k * vida["vida_anios"]
+                if t_rep < horizonte:
+                    costo_reemplazos += costo_bateria_unit / (1 + desc) ** t_rep
+            capex_real += costo_reemplazos
+            # Pérdidas evitadas por interrupciones (beneficio anual adicional).
+            beneficio_int = (float(cot_apagones or 0) * float(cot_horas or 0)
+                             * float(cot_costo_hora or 0))
+            ahorro_total = res["ahorro_anual"] + beneficio_int
+            vp = ahorro_total * factor_vp_ahorros(infl, desc, horizonte)
+            npv_real = vp - capex_real
+            payback_real = (capex_real / ahorro_total
+                            if ahorro_total > 0 else float("inf"))
+            roi_real = (npv_real / capex_real * 100.0) if capex_real > 0 else 0.0
+            cot = dict(
+                modo=cot_modo, costo_paneles=costo_paneles, costo_bess=costo_bess,
+                costo_bos=costo_bos, costo_reemplazos=costo_reemplazos,
+                capex_real=capex_real, beneficio_int=beneficio_int,
+                ahorro_total=ahorro_total, npv_real=npv_real,
+                payback_real=payback_real, roi_real=roi_real,
+            )
+            # Con cotización activa, las tarjetas principales reflejan los KPIs
+            # ajustados (CapEx real + pérdidas evitadas), para que cambiar estos
+            # campos sí mueva ROI / Payback / VPN / Ahorro a la vista.
+            kpi_roi = [f"{roi_real:.0f}", html.Span("%", className="u")]
+            kpi_npv = [f"${npv_real/1000:,.0f}", html.Span("k MXN", className="u")]
+            payback_txt = ("∞" if payback_real == float("inf")
+                           else [f"{payback_real:.1f}",
+                                 html.Span("años", className="u")])
+            kpi_ahorro = [f"${ahorro_total/1000:,.0f}",
+                          html.Span("k MXN/año", className="u")]
+            foot_roi = "con pérdidas evitadas"
+            foot_payback = ("no se recupera" if payback_real == float("inf")
+                            else "cotización + interrupciones")
+            foot_npv = "VPN con cotización real"
+            foot_ahorro = (f"CFE ${res['ahorro_anual']:,.0f} + interrup. "
+                           f"${beneficio_int:,.0f}")
+            summary_rows.append(
+                _summ_row("CapEx considerado", f"${capex_real:,.0f}"))
+            summary_rows.append(
+                _summ_row("ROI con pérdidas evitadas", f"{roi_real:.0f} %",
+                          strong=True))
+
+        summary = html.Div(className="fin-summary-grid", children=summary_rows)
 
         table = build_recibo_table(res["df_recibo_sis"])
+        report = build_project_report(num_paneles, area, df_dem, res, cot, vida)
+        recibo_json = res["df_recibo_sis"].to_json(orient="split",
+                                                   date_format="iso")
+        fig_sol_mo, fig_sol_da, fig_sol_irr = build_solar_report_figs(df_solar)
 
         return (kpi_roi, payback_txt, kpi_npv, kpi_ahorro, kpi_curtail,
                 foot_roi, foot_payback, foot_npv, foot_ahorro, foot_curtail,
                 fig_bill, fig_curtail, fig_energy, fig_payback,
-                recs, summary, table, "alert hidden", "")
+                recs, summary, table, report,
+                fig_sol_mo, fig_sol_da, fig_sol_irr,
+                fig_bill, fig_energy, fig_payback, recibo_json,
+                "alert hidden", "")
 
     except Exception as exc:
         return err(str(exc))
@@ -2338,6 +3371,178 @@ def _summ_row(label, value, strong=False):
                         html.Span(label, className="fs-lbl"),
                         html.Span(value, className="fs-val"),
                     ])
+
+
+def _report_section(titulo, rows):
+    return html.Div(className="report-section", children=[
+        html.H4(titulo, className="report-h"),
+        html.Div(className="fin-summary-grid", children=rows),
+    ])
+
+
+def _vida_str(vida):
+    """Texto de la vida útil estimada (años + qué la limita)."""
+    v = vida["vida_anios"]
+    if v == float("inf"):
+        return "sin uso (∞)"
+    return f"{v:.1f} años · limita {vida['limita']}"
+
+
+def figure_to_df(fig):
+    """Convierte una figura (dict de Plotly) en un DataFrame con sus datos.
+
+    Si todas las trazas comparten el mismo eje X, produce columnas ``x`` + una
+    por traza; si no, usa formato largo (serie, x, y).
+    """
+    if not fig:
+        return None
+    data = fig.get("data") if isinstance(fig, dict) else getattr(fig, "data", None)
+    if not data:
+        return None
+    series = []
+    for i, tr in enumerate(data):
+        get = tr.get if isinstance(tr, dict) else (lambda k, d=None: getattr(tr, k, d))
+        y = get("y")
+        if y is None:
+            continue
+        x = get("x")
+        name = get("name") or f"serie{i + 1}"
+        series.append((str(name), list(x) if x is not None else None, list(y)))
+    if not series:
+        return None
+    xs = [s[1] for s in series]
+    same_x = (all(x is not None for x in xs)
+              and len({len(x) for x in xs}) == 1
+              and all(xs[0] == x for x in xs))
+    if same_x:
+        df = pd.DataFrame({"x": xs[0]})
+        seen = {}
+        for name, _x, y in series:
+            col = name
+            if col in seen:
+                seen[col] += 1
+                col = f"{name}_{seen[name]}"
+            else:
+                seen[col] = 0
+            if len(y) != len(df):
+                y = (list(y) + [None] * len(df))[:len(df)]
+            df[col] = y
+        return df
+    rows = []
+    for name, x, y in series:
+        xv = x if x is not None else list(range(len(y)))
+        for xi, yi in zip(xv, y):
+            rows.append({"serie": name, "x": xi, "y": yi})
+    return pd.DataFrame(rows)
+
+
+def build_solar_report_figs(df_solar):
+    """Figuras solares del reporte derivadas del store solar (potencia 15-min).
+
+    Devuelve (mensual, diaria, irradiancia GHI vs POA). La energía se obtiene de
+    ``potencia_generada`` (W × 0.25 h / 1000), válido para cualquier resolución.
+    """
+    e_kwh = df_solar["potencia_generada"] * 0.25 / 1000.0
+    df_monthly = e_kwh.resample("ME").sum()
+    daily = e_kwh.resample("D").sum()
+    peak_idx = int(df_monthly.values.argmax()) if len(df_monthly) else 0
+    fig_mo = build_monthly_fig(df_monthly, peak_idx)
+    fig_da = build_daily_fig(daily)
+    # Ventana representativa cerca del equinoccio de primavera (GHI vs POA).
+    try:
+        yr = df_solar.index[0].year
+        target = pd.Timestamp(year=yr, month=3, day=20)
+        mask = (df_solar.index >= target) & \
+               (df_solar.index < target + pd.Timedelta(days=3))
+        sample = df_solar.loc[mask]
+        if sample.empty:
+            sample = df_solar.iloc[:min(len(df_solar), 288)]
+        fig_irr = build_irradiance_fig(sample)
+    except Exception:
+        fig_irr = empty_fig("Irradiancia no disponible")
+    return fig_mo, fig_da, fig_irr
+
+
+def build_project_report(num_paneles, area, df_dem, res, cot, vida=None):
+    """Documento imprimible del proyecto (resumen para PDF).
+
+    Reúne sistema, energía, batería (vida útil), finanzas (ahorro CFE) y —si se
+    activó— la cotización realista con pilas + instalación/BOS + pérdidas
+    evitadas + reemplazos de batería y el ROI ajustado.
+    """
+    fecha = datetime.date.today().strftime("%d/%m/%Y")
+    demanda_anual = float(df_dem["Energia_kWh"].sum())
+    payback = res["payback_anios"]
+    payback_s = "∞" if payback == float("inf") else f"{payback:.1f} años"
+
+    secciones = [
+        html.Div(className="report-head", children=[
+            html.Strong("Kardashev-I · Reporte de proyecto fotovoltaico"),
+            html.Span(f"Generado el {fecha}", className="report-date"),
+        ]),
+        _report_section("Sistema", [
+            _summ_row("Paneles", f"{num_paneles} uds · {num_paneles*area:.1f} m²"),
+            _summ_row("Almacenamiento necesario",
+                      f"{res['sizing_diario_requerido']:,.0f} kWh", strong=True),
+            _summ_row("Pilas (referencia)", f"{res['cant_pilas']} uds"),
+        ]),
+        _report_section("Energía (anual)", [
+            _summ_row("Demanda", f"{demanda_anual:,.0f} kWh/año"),
+            _summ_row("Solar generada", f"{res['total_generada']:,.0f} kWh/año"),
+            _summ_row("Curtailment", f"{res['pct_desperdicio']:.1f} %"),
+        ]),
+    ]
+
+    if vida:
+        secciones.append(_report_section("Batería · vida útil", [
+            _summ_row("Química", vida["nombre"]),
+            _summ_row("Ciclos equivalentes / año",
+                      f"{vida['ciclos_por_anio']:.0f}"),
+            _summ_row("Vida útil estimada", _vida_str(vida), strong=True),
+            _summ_row("Reemplazos en el horizonte", f"{vida['reemplazos']}"),
+        ]))
+
+    secciones.append(_report_section("Financiero · ahorro CFE", [
+        _summ_row("Ahorro anual CFE", f"${res['ahorro_anual']:,.0f}"),
+        _summ_row("ROI (horizonte)", f"{res['roi_pct']:.0f} %"),
+        _summ_row("Payback", payback_s),
+        _summ_row("VPN", f"${res['npv']:,.0f}"),
+    ]))
+
+    if cot:
+        pb = cot["payback_real"]
+        pb_s = "∞" if pb == float("inf") else f"{pb:.1f} años"
+        cot_rows = []
+        if cot.get("modo") == "total":
+            cot_rows.append(_summ_row("CapEx total (cotización)",
+                                      f"${cot['capex_real']:,.0f}", strong=True))
+        else:
+            cot_rows += [
+                _summ_row("Costo paneles", f"${cot['costo_paneles']:,.0f}"),
+                _summ_row("Costo BESS instalado", f"${cot['costo_bess']:,.0f}"),
+                _summ_row("Instalación / BOS", f"${cot['costo_bos']:,.0f}"),
+                _summ_row("CapEx total (realista)",
+                          f"${cot['capex_real']:,.0f}", strong=True),
+            ]
+        cot_rows += [
+            _summ_row("Reemplazos de batería (VP)",
+                      f"${cot.get('costo_reemplazos', 0):,.0f}"),
+            _summ_row("Pérdidas evitadas / año", f"${cot['beneficio_int']:,.0f}"),
+            _summ_row("Ahorro total / año", f"${cot['ahorro_total']:,.0f}"),
+            _summ_row("ROI por pérdidas evitadas",
+                      f"{cot['roi_real']:.0f} %", strong=True),
+            _summ_row("Payback ajustado", pb_s),
+            _summ_row("VPN ajustado", f"${cot['npv_real']:,.0f}"),
+        ]
+        secciones.append(_report_section(
+            "Cotización realista · costo del sistema + interrupciones", cot_rows))
+    else:
+        secciones.append(html.P(
+            "Activa «cotización realista» antes de ejecutar para incluir pilas, "
+            "instalación/BOS y el costo de las interrupciones evitadas.",
+            className="tarifa-desc"))
+
+    return html.Div(className="report-doc", children=secciones)
 
 
 if __name__ == "__main__":
