@@ -88,7 +88,7 @@ def _costo_mensual_cfe(tarifa, mes, kwh_mes, e_base, e_int, e_punta,
        fuera de verano), SIN cargo por demanda (kW) ni horarios. No aplica FP.
      - **DAC (flat doméstica):** energía plana, sin demanda ni horarios.
      - **GDMTO (flat comercial):** energía plana + cargo por demanda máxima (kW).
-     - **HM / GDMTH (horaria):** energía por periodo + cargos por demanda
+     - **GDMTH (horaria):** energía por periodo + cargos por demanda
        (punta y máxima). Aplica penalización por factor de potencia.
 
     El cargo fijo mensual se devuelve aparte para no someterlo a la

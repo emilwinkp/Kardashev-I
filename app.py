@@ -116,8 +116,8 @@ CAP_RESPALDO_DEFAULT = 0        # kWh
 COSTO_KWH_BESS_DEFAULT = 12000    # MXN/kWh instalado (LiFePO4 llave en mano)
 BOS_PCT_DEFAULT = 30              # % BOS sobre equipo (inversores, montaje, instalación, trámites)
 COSTO_TOTAL_DEFAULT = 200000    # MXN — costo total del proyecto (cotización directa)
-COT_APAGONES_DEFAULT = 12         # apagones/año (para pérdidas evitadas)
-COT_HORAS_DEFAULT = 2             # h por apagón
+# Pérdidas evitadas por interrupciones: reutilizan el nº de apagones y la
+# duración del Modo Avanzado; solo se captura el costo por hora de inactividad.
 COT_COSTO_HORA_DEFAULT = 5000     # MXN/hora de inactividad
 
 # Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
@@ -1635,56 +1635,66 @@ finance_page = html.Main(className="main", children=[
                 html.P("", id="bateria-rango", className="tarifa-desc"),
             ]),
 
-            # ── Tarifa GDMTH manual + finanzas avanzadas (solo Modo Avanzado) ──
+            # ── Tarifa horaria manual + finanzas avanzadas (solo Modo Avanzado) ──
             html.Div(className="adv-only", children=[
+                # Costos por horario: solo tienen sentido en la tarifa horaria
+                # GDMTH; se ocultan para doméstica (bloques) y GDMTO (plana).
+                html.Div(id="wrap-tarifa-horaria", children=[
+                    html.Div(className="fin-divider",
+                             children="tarifa CFE horaria (GDMTH)"),
+                    html.Div(className="info-box info-box--sm", children=[
+                        "Precios por horario y cargos por demanda (kW) de la "
+                        "tarifa GDMTH. Solo aplican a GDMTH: las domésticas se "
+                        "cobran por bloques y la GDMTO con energía plana, por "
+                        "eso estos campos no se muestran para ellas.",
+                    ]),
+                    html.Div(className="fin-inputs", children=[
+                        html.Div(className="field", children=[
+                            html.Label(["Precio Base ",
+                                        html.Span("MXN/kWh", className="hint")]),
+                            dcc.Input(id="inp-precio-base", type="number",
+                                      value=PRECIO_BASE_DEFAULT, step="any", min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Precio Intermedio ",
+                                        html.Span("MXN/kWh", className="hint")]),
+                            dcc.Input(id="inp-precio-int", type="number",
+                                      value=PRECIO_INT_DEFAULT, step="any", min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Precio Punta ",
+                                        html.Span("MXN/kWh", className="hint")]),
+                            dcc.Input(id="inp-precio-punta", type="number",
+                                      value=PRECIO_PUNTA_DEFAULT, step="any", min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Cargo capacidad ",
+                                        html.Span("MXN/kW", className="hint")]),
+                            dcc.Input(id="inp-cargo-cap", type="number",
+                                      value=CARGO_CAP_DEFAULT, step="any", min=0,
+                                      className="input", debounce=True),
+                        ]),
+                        html.Div(className="field", children=[
+                            html.Label(["Cargo distribución ",
+                                        html.Span("MXN/kW", className="hint")]),
+                            dcc.Input(id="inp-cargo-dist", type="number",
+                                      value=CARGO_DIST_DEFAULT, step="any", min=0,
+                                      className="input", debounce=True),
+                        ]),
+                    ]),
+                ]),
+                # Supuestos financieros: aplican a cualquier tarifa.
                 html.Div(className="fin-divider",
-                         children="tarifa CFE GDMTH personalizada"),
+                         children="supuestos financieros"),
                 html.Div(className="info-box info-box--sm", children=[
-                    "Ajusta los precios por horario de la tarifa GDMTH y los "
-                    "supuestos financieros. Estos precios y cargos por demanda "
-                    "(kW) solo aplican a las tarifas horarias (HM/GDMTH); las "
-                    "domésticas se cobran por bloques y la GDMTO con energía "
-                    "plana. El VPN se calcula como una anualidad creciente: el "
-                    "ahorro sube con la inflación y se descuenta a la tasa "
-                    "indicada a lo largo de los años de proyección que definas "
-                    "(por defecto 10).",
+                    "El VPN se calcula como una anualidad creciente: el ahorro "
+                    "sube con la inflación y se descuenta a la tasa indicada a lo "
+                    "largo de los años de proyección que definas (por defecto 10).",
                 ]),
                 html.Div(className="fin-inputs", children=[
-                    html.Div(className="field", children=[
-                        html.Label(["Precio Base ",
-                                    html.Span("MXN/kWh", className="hint")]),
-                        dcc.Input(id="inp-precio-base", type="number",
-                                  value=PRECIO_BASE_DEFAULT, step="any", min=0,
-                                  className="input", debounce=True),
-                    ]),
-                    html.Div(className="field", children=[
-                        html.Label(["Precio Intermedio ",
-                                    html.Span("MXN/kWh", className="hint")]),
-                        dcc.Input(id="inp-precio-int", type="number",
-                                  value=PRECIO_INT_DEFAULT, step="any", min=0,
-                                  className="input", debounce=True),
-                    ]),
-                    html.Div(className="field", children=[
-                        html.Label(["Precio Punta ",
-                                    html.Span("MXN/kWh", className="hint")]),
-                        dcc.Input(id="inp-precio-punta", type="number",
-                                  value=PRECIO_PUNTA_DEFAULT, step="any", min=0,
-                                  className="input", debounce=True),
-                    ]),
-                    html.Div(className="field", children=[
-                        html.Label(["Cargo capacidad ",
-                                    html.Span("MXN/kW", className="hint")]),
-                        dcc.Input(id="inp-cargo-cap", type="number",
-                                  value=CARGO_CAP_DEFAULT, step="any", min=0,
-                                  className="input", debounce=True),
-                    ]),
-                    html.Div(className="field", children=[
-                        html.Label(["Cargo distribución ",
-                                    html.Span("MXN/kW", className="hint")]),
-                        dcc.Input(id="inp-cargo-dist", type="number",
-                                  value=CARGO_DIST_DEFAULT, step="any", min=0,
-                                  className="input", debounce=True),
-                    ]),
                     html.Div(className="field", children=[
                         html.Label(["Inflación energía ",
                                     html.Span("%/año", className="hint")]),
@@ -1775,21 +1785,11 @@ finance_page = html.Main(className="main", children=[
                            "(batería+inversor+instalación) más el % BOS. «Costo "
                            "total» usa directamente el monto de tu cotización.",
                            className="tarifa-desc"),
-                    # Interrupciones (pérdidas evitadas) — aplican a ambos orígenes.
+                    # Interrupciones (pérdidas evitadas) — reutiliza el número de
+                    # apagones y la duración capturados arriba (mismos eventos que
+                    # dimensionan la batería), para no pedir lo mismo dos veces.
+                    # Aquí solo se añade el costo monetario de cada hora caída.
                     html.Div(className="fin-inputs", children=[
-                        html.Div(className="field", children=[
-                            html.Label(["Apagones ", html.Span("/año", className="hint")]),
-                            dcc.Input(id="inp-cot-apagones", type="number",
-                                      value=COT_APAGONES_DEFAULT, step=1, min=0,
-                                      className="input", debounce=True),
-                        ]),
-                        html.Div(className="field", children=[
-                            html.Label(["Horas por apagón ",
-                                        html.Span("h", className="hint")]),
-                            dcc.Input(id="inp-cot-horas", type="number",
-                                      value=COT_HORAS_DEFAULT, step=0.5, min=0,
-                                      className="input", debounce=True),
-                        ]),
                         html.Div(className="field", children=[
                             html.Label(["Costo inactividad ",
                                         html.Span("MXN/h", className="hint")]),
@@ -1798,6 +1798,11 @@ finance_page = html.Main(className="main", children=[
                                       className="input", debounce=True),
                         ]),
                     ]),
+                    html.P("Las pérdidas evitadas usan el «Núm. apagones» y la "
+                           "«Duración apagón» que definiste arriba (los mismos "
+                           "eventos que dimensionan la batería) multiplicados por "
+                           "este costo por hora de inactividad.",
+                           className="tarifa-desc"),
                 ]),
             ]),
 
@@ -2505,6 +2510,17 @@ def tarifa_info(familia, subtarifa):
     if not t:
         return "", ""
     return t["descripcion"], t.get("actualizado", "")
+
+
+@callback(
+    Output("wrap-tarifa-horaria", "style"),
+    Input("dd-tarifa", "value"),
+)
+def toggle_tarifa_horaria(familia):
+    """Muestra los precios por horario solo para la tarifa horaria GDMTH."""
+    if familia == "GDMTH":
+        return {}
+    return {"display": "none"}
 
 
 @callback(
@@ -3233,8 +3249,6 @@ def parse_demand(contents, filename):
     State("inp-costo-kwh-bess", "value"),
     State("inp-bos-pct", "value"),
     State("inp-costo-total", "value"),
-    State("inp-cot-apagones", "value"),
-    State("inp-cot-horas", "value"),
     State("inp-cot-costo-hora", "value"),
     State("dd-tarifa", "value"),
     State("dd-subtarifa", "value"),
@@ -3246,7 +3260,7 @@ def run_financial(_, store_df, store_meta, store_demand,
                   ui_mode, precio_base, precio_int, precio_punta,
                   cargo_cap, cargo_dist, inflacion, descuento, horizonte_val,
                   chk_cotizacion, cot_modo, costo_kwh_bess, bos_pct, costo_total,
-                  cot_apagones, cot_horas, cot_costo_hora, familia, subtarifa):
+                  cot_costo_hora, familia, subtarifa):
     blank = empty_fig()
     dash_vals = ["—"] * 5
     foots = [""] * 5
@@ -3320,7 +3334,7 @@ def run_financial(_, store_df, store_meta, store_demand,
 
         # Tarifa CFE elegida (familia + subtarifa doméstica): define cómo se
         # factura el recibo — bloques sin horarios para doméstica, plana para
-        # GDMTO, horaria con demanda para HM/GDMTH.
+        # GDMTO, horaria con demanda para GDMTH.
         tarifa_id = tarifas_cfe.tarifa_efectiva(familia, subtarifa)
 
         res = simular_financiero(
@@ -3424,7 +3438,9 @@ def run_financial(_, store_df, store_meta, store_demand,
                     costo_reemplazos += costo_bateria_unit / (1 + desc) ** t_rep
             capex_real += costo_reemplazos
             # Pérdidas evitadas por interrupciones (beneficio anual adicional).
-            beneficio_int = (float(cot_apagones or 0) * float(cot_horas or 0)
+            # Reutiliza los mismos apagones/duración que dimensionan la batería
+            # (n_apagones · dur_ap), no parámetros duplicados.
+            beneficio_int = (float(n_apagones or 0) * float(dur_ap or 0)
                              * float(cot_costo_hora or 0))
             ahorro_total = res["ahorro_anual"] + beneficio_int
             vp = ahorro_total * factor_vp_ahorros(infl, desc, horizonte)

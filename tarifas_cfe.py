@@ -12,9 +12,9 @@ Familias soportadas:
  - **DAC**: doméstica de alto consumo, precio plano (sin subsidio) + cargo fijo.
  - **GDMTO**: gran demanda media tensión *ordinaria* (< 100 kW): cargo de
    energía plano (sin horarios) + cargo fijo de suministro.
- - **HM**: media tensión horaria (Base / Intermedio / Punta), estimador ligero.
- - **GDMTH**: gran demanda MT *horaria* (≥ 100 kW); se delega al motor
-   financiero completo (batería + apagones + ROI).
+ - **GDMTH**: gran demanda MT *horaria* (≥ 100 kW) con periodos
+   Base / Intermedio / Punta; se delega al motor financiero completo
+   (batería + apagones + ROI).
 
 Los precios y los límites son DE REFERENCIA (CFE jun-2026, análisis de tarifas)
 y editables: cada tarifa lleva una fecha ``actualizado`` que la UI muestra para
@@ -197,22 +197,13 @@ TARIFAS = {
             "integrada de referencia 1.107 MXN/kWh (Monterrey 2026)."
         ),
     },
-    "HM": {
-        "nombre": "HM — Horaria Media Tensión",
-        "tipo": "tou", "familia": "comercial",
-        "precios": {"Base": 0.8969, "Intermedio": 1.3806, "Punta": 1.4964},
-        "cargo_fijo": CARGO_FIJO_MT,
-        "actualizado": ACTUALIZADO,
-        "descripcion": (
-            "Media tensión con precio por horario: base (madrugada), "
-            "intermedio (día) y punta (tarde-noche), más caro en punta. "
-            "Estimador ligero; equivale a la energía integrada de GDMTH."
-        ),
-    },
     "GDMTH": {
         "nombre": "GDMTH — Gran Demanda MT Horaria",
         "tipo": "gdmth", "familia": "comercial",
         "delegado": True, "cargo_fijo": CARGO_FIJO_MT,
+        # Energía integrada por horario (Monterrey 2026): la usa el estimador
+        # ligero para invertir recibo→kWh; el motor financiero la recalcula.
+        "precios": {"Base": 0.8969, "Intermedio": 1.3806, "Punta": 1.4964},
         "actualizado": ACTUALIZADO,
         "descripcion": (
             "Gran demanda en media tensión (≥ 100 kW) con horarios "
@@ -299,7 +290,7 @@ def estimar_recibo(perfil_15min, tarifa_id):
     perfil_15min : DataFrame
         Índice 15-min tz-naive con columna ``Energia_kWh``.
     tarifa_id : str
-        Clave en :data:`TARIFAS` (doméstica/DAC/HM). Para GDMTH usar el motor
+        Clave en :data:`TARIFAS` (doméstica/DAC/GDMTO). Para GDMTH usar el motor
         financiero completo.
 
     Returns
@@ -363,11 +354,11 @@ def rate_efectiva(tarifa_id):
         kwh_ref = 250.0
         bloques = _bloques_representativos(tarifa)
         return _costo_bloques(kwh_ref, bloques) / kwh_ref
-    if tarifa["tipo"] == "tou":
+    if tarifa["tipo"] in ("tou", "gdmth") and "precios" in tarifa:
         # Pesos representativos residenciales: base 0.25, intermedio 0.55, punta 0.20.
         p = tarifa["precios"]
         return 0.25 * p["Base"] + 0.55 * p["Intermedio"] + 0.20 * p["Punta"]
-    # GDMTH: aproximación con precio intermedio.
+    # Sin precios horarios definidos: aproximación con precio intermedio.
     return 1.50
 
 
@@ -382,7 +373,7 @@ def kwh_mes_desde_costo(costo_mxn, tarifa_id, mes=1):
     """Estima los kWh de un mes a partir de su costo (MXN), invirtiendo la tarifa.
 
     Para tarifas estacionales (1A–1F) usa los bloques del ``mes`` indicado.
-    GDMTH se aproxima con la estructura horaria HM.
+    GDMTH se aproxima con su precio efectivo horario.
     """
     if costo_mxn is None or costo_mxn <= 0:
         raise ValueError("El costo mensual debe ser mayor que 0.")
@@ -397,8 +388,7 @@ def kwh_mes_desde_costo(costo_mxn, tarifa_id, mes=1):
     if tarifa["tipo"] == "tiered":
         return _kwh_desde_costo_bloques(costo_energia, _bloques_para_mes(tarifa, mes))
     # tou / gdmth: precio efectivo aproximado.
-    tid = "HM" if tarifa["tipo"] == "gdmth" else tarifa_id
-    return costo_energia / rate_efectiva(tid)
+    return costo_energia / rate_efectiva(tarifa_id)
 
 
 # ── Helpers para el selector de la UI (familia → subtarifa) ──────────────────
@@ -408,7 +398,6 @@ def familias_dropdown():
     return [
         {"label": "Doméstica (CFE 1/1A…1F/DAC)", "value": "domestica"},
         {"label": "GDMTO — Gran Demanda MT Ordinaria (plana)", "value": "GDMTO"},
-        {"label": "HM — Horaria Media Tensión", "value": "HM"},
         {"label": "GDMTH — Gran Demanda MT Horaria", "value": "GDMTH"},
     ]
 
@@ -425,11 +414,11 @@ def tarifa_efectiva(familia, subtarifa=None):
     """Resuelve el id de tarifa concreto a partir de familia + subtarifa.
 
     Doméstica → la subtarifa elegida (default ``1C``); comercial → la propia
-    familia (HM / GDMTH).
+    familia (GDMTO / GDMTH).
     """
     if familia == "domestica":
         return subtarifa if subtarifa in TARIFAS else "1C"
-    return familia if familia in TARIFAS else "HM"
+    return familia if familia in TARIFAS else "GDMTH"
 
 
 def opciones_dropdown():
