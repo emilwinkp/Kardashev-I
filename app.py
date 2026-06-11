@@ -23,8 +23,8 @@ from timezonefinder import TimezoneFinder
 from motor_2 import calculate
 from motor_fisica_avanzada import calculate_advanced, apply_advanced_losses
 from motor_financiero import (HORIZONTE_ANIOS, TASA_DESCUENTO_DEFAULT,
-                              TASA_INFLACION_DEFAULT, factor_vp_ahorros,
-                              simular_financiero)
+                              TASA_INFLACION_DEFAULT, _generar_recomendaciones,
+                              factor_vp_ahorros, simular_financiero)
 from motor_diagnostico import dia_tipico, preparar_dia, DIA_TIPICO_DEFAULT
 from motor_tmy import calculate_tmy, TMYUnavailable, preparar_tmy, poa_anual
 import perfil_demanda
@@ -82,7 +82,7 @@ AZ_DEFAULT = 0   # Convención de UI: 0° = Sur (se convierte a geográfica para
 # Panel estándar de la industria (módulo monocristalino moderno):
 # 440 Wp en STC = 2.0 m² × 22 % de eficiencia (número nominal redondo).
 AREA_DEFAULT = 2.0      # m² por panel (estándar de la industria)
-N_PANELS_DEFAULT = 1   # número de paneles → total 40 m²
+N_PANELS_DEFAULT = 100  # preset demo: 100 paneles → 200 m² (≈44 kWp)
 EFF_DEFAULT = 0.22      # η módulo monocristalino moderno (~22 %)
 PNOM_DEFAULT = 440      # Wp nominal STC/panel = AREA_DEFAULT · EFF_DEFAULT · 1000
 PR_DEFAULT = 0.82
@@ -99,26 +99,26 @@ DEGR_DEFAULT = 0.5      # %/año degradación
 
 # Consumo (Modo Simple)
 KWH_MES_DEFAULT = 450   # kWh/mes (≈ 15 kWh/día, dato del recibo)
-RECIBO_MES_DEFAULT = 1500  # MXN/mes
-FAMILIA_DEFAULT = "domestica"
+RECIBO_MES_DEFAULT = 10000  # MXN/mes (preset demo)
+FAMILIA_DEFAULT = "GDMTO"  # preset demo (gran demanda MT plana, < 100 kW)
 SUBTARIFA_DEFAULT = "1C"
 MESES_ES_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
                   "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 # Defaults financieros (editables en la página de análisis)
 COSTO_PANEL_M2_DEFAULT = 1100     # MXN / m²
-COSTO_PILA_DEFAULT = 500000       # MXN / pila (100 kWh)
-NUM_APAGONES_DEFAULT = 0
-DUR_APAGON_DEFAULT = 1         # horas
-CAP_RESPALDO_DEFAULT = 0        # kWh
+COSTO_PILA_DEFAULT = 400000       # MXN / pila (100 kWh)
+NUM_APAGONES_DEFAULT = 10       # preset demo
+DUR_APAGON_DEFAULT = 2.5       # horas (preset demo: justifica los 100 kWh)
+CAP_RESPALDO_DEFAULT = 100      # kWh (preset demo = 1 pila)
 
 # Cotización realista (capa opcional dentro del análisis)
 COSTO_KWH_BESS_DEFAULT = 12000    # MXN/kWh instalado (LiFePO4 llave en mano)
 BOS_PCT_DEFAULT = 30              # % BOS sobre equipo (inversores, montaje, instalación, trámites)
-COSTO_TOTAL_DEFAULT = 200000    # MXN — costo total del proyecto (cotización directa)
+COSTO_TOTAL_DEFAULT = 1000000   # MXN — costo total del proyecto (preset demo)
 # Pérdidas evitadas por interrupciones: reutilizan el nº de apagones y la
 # duración del Modo Avanzado; solo se captura el costo por hora de inactividad.
-COT_COSTO_HORA_DEFAULT = 5000     # MXN/hora de inactividad
+COT_COSTO_HORA_DEFAULT = 6000     # MXN/hora de inactividad (preset demo)
 
 # Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
 # (energía integrada y cargos por demanda de referencia CFE 2026, Golfo Norte).
@@ -1445,7 +1445,7 @@ finance_page = html.Main(className="main", children=[
                                 {"label": " kWh / mes", "value": "kwh"},
                                 {"label": " Recibo MXN / mes", "value": "recibo"},
                             ],
-                            value="kwh", inline=True,
+                            value="recibo", inline=True,
                         ),
                     ]),
                     html.Div(className="field", children=[
@@ -1730,7 +1730,7 @@ finance_page = html.Main(className="main", children=[
                             "label": " Incluir cotización realista "
                                      "(pilas, instalación e interrupciones)",
                             "value": "on"}],
-                        value=[],
+                        value=["on"],  # preset demo: cotización activa
                     ),
                     html.P("Reemplaza la estimación de catálogo: usa el costo "
                            "real del sistema (llave en mano) más el valor de las "
@@ -1750,7 +1750,7 @@ finance_page = html.Main(className="main", children=[
                                 {"label": " Costo total del proyecto",
                                  "value": "total"},
                             ],
-                            value="desglose", inline=True,
+                            value="total", inline=True,  # preset demo: costo total directo
                         ),
                     ]),
                     # A) Estimación por $/kWh + BOS.
@@ -3471,6 +3471,28 @@ def run_financial(_, store_df, store_meta, store_demand,
             foot_npv = "VPN con cotización real"
             foot_ahorro = (f"CFE ${res['ahorro_anual']:,.0f} + interrup. "
                            f"${beneficio_int:,.0f}")
+
+            # La gráfica de VPN acumulado y las recomendaciones deben contar la
+            # misma historia que las tarjetas: se reconstruyen con el CapEx real
+            # de la cotización y el ahorro total (no el CapEx de catálogo del
+            # motor), si no el VPN de abajo contradice al de arriba.
+            acum = -capex_real
+            flujo_cot = []
+            for t_anio in range(1, horizonte + 1):
+                ahorro_desc = (ahorro_total * (1 + infl) ** (t_anio - 1)
+                               / (1 + desc) ** t_anio)
+                acum += ahorro_desc
+                flujo_cot.append({"Anio": t_anio,
+                                  "Acumulado_MXN": round(acum, 2)})
+            fig_payback = build_payback_fig(pd.DataFrame(flujo_cot))
+            recs = build_recommendations(_generar_recomendaciones(
+                payback_anios=payback_real, npv=npv_real, roi_pct=roi_real,
+                pct_desperdicio=res["pct_desperdicio"], ahorro_anual=ahorro_total,
+                fp_sis=res["df_recibo_sis"]["FP_Mensual"].min(),
+                sizing=res["sizing_diario_requerido"], cant_pilas=res["cant_pilas"],
+                cobertura=res["cobertura"],
+            ))
+
             summary_rows.append(
                 _summ_row("CapEx realista (llave en mano)",
                           f"${capex_real:,.0f}"))
