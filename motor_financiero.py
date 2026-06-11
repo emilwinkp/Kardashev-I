@@ -13,12 +13,13 @@ import numpy as np
 import pandas as pd
 
 # ───────────────────────── Constantes económicas FIJAS ─────────────────────────
-# Tarifa CFE GDMTH (MXN). Estructura de periodos y precios fijos por decisión de diseño.
-PRECIO_BASE = 1.10
-PRECIO_INTERMEDIO = 1.50
-PRECIO_PUNTA = 3.20
-CARGO_CAPACIDAD = 350.00      # MXN por kW de demanda en punta
-CARGO_DISTRIBUCION = 100.00   # MXN por kW de demanda máxima
+# Tarifa CFE GDMTH (MXN). Energía integrada por horario y cargos por demanda de
+# referencia para 2026 (Monterrey / Golfo Norte). Editables en Modo Avanzado.
+PRECIO_BASE = 0.8969          # MXN/kWh en horario Base (madrugada)
+PRECIO_INTERMEDIO = 1.3806    # MXN/kWh en horario Intermedio (día)
+PRECIO_PUNTA = 1.4964         # MXN/kWh en horario Punta (tarde-noche)
+CARGO_CAPACIDAD = 358.41      # MXN por kW de demanda en punta (generación/capacidad)
+CARGO_DISTRIBUCION = 90.01    # MXN por kW de demanda máxima (distribución de red)
 
 # Parámetros financieros fijos (modelo de simulacion_1.py)
 # Factor de valor presente de los ahorros a lo largo del horizonte del proyecto.
@@ -78,6 +79,37 @@ def _factor_potencia_efecto(fp):
     return -(1 / 4) * (1 - (0.90 / fp))
 
 
+def _costo_mensual_cfe(tarifa, mes, kwh_mes, e_base, e_int, e_punta,
+                       dem_max, dem_punta, p_base, p_int, p_punta, c_cap, c_dist):
+    """Costo CFE del mes según la **forma de cobrar** de la tarifa elegida.
+
+    Devuelve ``(subtotal, cargo_fijo, aplica_fp)``:
+     - **Doméstica (tiered):** energía por bloques mensuales del mes (verano /
+       fuera de verano), SIN cargo por demanda (kW) ni horarios. No aplica FP.
+     - **DAC (flat doméstica):** energía plana, sin demanda ni horarios.
+     - **GDMTO (flat comercial):** energía plana + cargo por demanda máxima (kW).
+     - **HM / GDMTH (horaria):** energía por periodo + cargos por demanda
+       (punta y máxima). Aplica penalización por factor de potencia.
+
+    El cargo fijo mensual se devuelve aparte para no someterlo a la
+    penalización por factor de potencia (que CFE aplica solo a energía+demanda).
+    """
+    cargo_fijo = tarifa.get("cargo_fijo", 0.0)
+    tipo = tarifa.get("tipo", "gdmth")
+    if tipo == "tiered":
+        import tarifas_cfe
+        bloques = tarifas_cfe._bloques_para_mes(tarifa, mes)
+        return tarifas_cfe._costo_bloques(kwh_mes, bloques), cargo_fijo, False
+    if tipo == "flat":
+        es_mt = tarifa.get("familia") == "comercial"
+        demanda = dem_max * c_dist if es_mt else 0.0
+        return kwh_mes * tarifa["precio_kwh"] + demanda, cargo_fijo, es_mt
+    # tou / gdmth (horaria): energía por periodo + cargos por demanda.
+    energia = e_base * p_base + e_int * p_int + e_punta * p_punta
+    demanda = dem_punta * c_cap + dem_max * c_dist
+    return energia + demanda, cargo_fijo, True
+
+
 def simular_financiero(df_solar, df_demanda, num_paneles, area,
                        costo_panel_m2, costo_pila,
                        cap_respaldo_max_kwh=500, num_apagones=30,
@@ -85,7 +117,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
                        precio_base=None, precio_intermedio=None, precio_punta=None,
                        cargo_capacidad=None, cargo_distribucion=None,
                        tasa_inflacion=None, tasa_descuento=None,
-                       horizonte=HORIZONTE_ANIOS):
+                       horizonte=HORIZONTE_ANIOS, tarifa_id=None):
     """Simula la operación del sistema FV+baterías y evalúa el proyecto.
 
     Parameters
@@ -103,6 +135,14 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
     -------
     dict con KPIs, DataFrames de recibos, resumen mensual y recomendaciones.
     """
+    # ── Tarifa CFE seleccionada: define la FORMA DE COBRAR del recibo ──
+    # Si no se da (o no existe), se usa el comportamiento histórico GDMTH horario
+    # con cargos por demanda, para no romper a quienes llamen sin tarifa.
+    tarifa_sel = {"tipo": "gdmth", "familia": "comercial", "cargo_fijo": 0.0}
+    if tarifa_id is not None:
+        import tarifas_cfe
+        tarifa_sel = tarifas_cfe.TARIFAS.get(tarifa_id, tarifa_sel)
+
     # ── Tarifas e inflación: usar los valores dados o los defaults fijos ──
     p_base = PRECIO_BASE if precio_base is None else float(precio_base)
     p_int = PRECIO_INTERMEDIO if precio_intermedio is None else float(precio_intermedio)
@@ -283,16 +323,17 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         if pd.isna(dem_punta):
             dem_punta = 0
 
-        costo_energia = (e_base * p_base + e_int * p_int
-                         + e_punta * p_punta)
-        subtotal = (costo_energia + dem_punta * c_cap
-                    + dem_max * c_dist)
-
         kwh_mes = df_mes['compra_red_kwh'].sum()
+        subtotal, cargo_fijo, aplica_fp = _costo_mensual_cfe(
+            tarifa_sel, mes, kwh_mes, e_base, e_int, e_punta,
+            dem_max, dem_punta, p_base, p_int, p_punta, c_cap, c_dist)
+
         kvarh_mes = df_mes['reactive_red_kvarh'].sum()
         fp = (kwh_mes / np.sqrt(kwh_mes ** 2 + kvarh_mes ** 2)
               if kwh_mes > 0 else 1.0)
-        efecto_fp = subtotal * _factor_potencia_efecto(fp)
+        # El factor de potencia solo penaliza a la media tensión; las domésticas
+        # (bloques/DAC) no llevan ese ajuste.
+        efecto_fp = subtotal * _factor_potencia_efecto(fp) if aplica_fp else 0.0
         desperdicio_mes = df_mes['energia_desperdiciada_kwh'].sum()
 
         recibo_sis.append({
@@ -301,7 +342,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
             'Demanda_Max_kW': round(dem_max, 1),
             'FP_Mensual': round(fp, 3),
             'Efecto_FP_MXN': round(efecto_fp, 2),
-            'Total_CFE_MXN': round(subtotal + efecto_fp, 2),
+            'Total_CFE_MXN': round(subtotal + efecto_fp + cargo_fijo, 2),
             'Solar_Desechada_kWh': round(desperdicio_mes, 1),
         })
 
@@ -315,15 +356,15 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
         if pd.isna(dem_punta_b):
             dem_punta_b = 0
 
-        costo_energia_b = (eb * p_base + ei * p_int
-                           + ep * p_punta)
-        subtotal_b = (costo_energia_b + dem_punta_b * c_cap
-                      + dem_max_b * c_dist)
-
         kwh_b = df_mes['Energia_kWh'].sum()
+        subtotal_b, cargo_fijo_b, aplica_fp_b = _costo_mensual_cfe(
+            tarifa_sel, mes, kwh_b, eb, ei, ep,
+            dem_max_b, dem_punta_b, p_base, p_int, p_punta, c_cap, c_dist)
+
         kvarh_b = df_mes['Energia_kVArh'].sum()
         fp_b = (kwh_b / np.sqrt(kwh_b ** 2 + kvarh_b ** 2) if kwh_b > 0 else 1.0)
-        efecto_fp_b = subtotal_b * _factor_potencia_efecto(fp_b)
+        efecto_fp_b = (subtotal_b * _factor_potencia_efecto(fp_b)
+                       if aplica_fp_b else 0.0)
 
         recibo_base.append({
             'Mes': mes,
@@ -331,7 +372,7 @@ def simular_financiero(df_solar, df_demanda, num_paneles, area,
             'Demanda_Max_kW': round(dem_max_b, 1),
             'FP_Mensual': round(fp_b, 3),
             'Efecto_FP_MXN': round(efecto_fp_b, 2),
-            'Total_CFE_MXN': round(subtotal_b + efecto_fp_b, 2),
+            'Total_CFE_MXN': round(subtotal_b + efecto_fp_b + cargo_fijo_b, 2),
         })
 
         # --- Energía mensual (para gráficas) ---

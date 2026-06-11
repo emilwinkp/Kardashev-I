@@ -147,3 +147,67 @@ def calculate_advanced(lat, lon, alt, tz, tilt, azimuth, area, efficiency, PR,
         "neto": s(e_net),
     }
     return df, perdidas
+
+
+def apply_advanced_losses(df_tmy, area, efficiency,
+                          gamma_pmax=GAMMA_PMAX_DEFAULT,
+                          noct=NOCT_DEFAULT,
+                          soiling=SOILING_DEFAULT,
+                          wiring_loss=WIRING_LOSS_DEFAULT,
+                          eta_inv=ETA_INV_DEFAULT,
+                          degradation=DEGRADACION_ANUAL_DEFAULT,
+                          year_index=0,
+                          use_iam=False):
+    """Aplica la cascada de pérdidas avanzada sobre un DataFrame TMY existente.
+
+    Equivale a calculate_advanced pero acepta el DataFrame ya calculado por
+    calculate_tmy (con poa_global y temp_air reales) en lugar de recomputar
+    el cielo claro. Usa temp_air del TMY para el modelo NOCT, lo que es más
+    realista que un escalar fijo.
+
+    Returns
+    -------
+    (df, perdidas) con el mismo formato que calculate_advanced.
+    """
+    df = df_tmy.copy()
+    poa = df["poa_global"].values
+    index = df.index
+
+    # Temperatura ambiente: usar la real del TMY cuando está disponible.
+    if "temp_air" in df.columns and not df["temp_air"].isna().all():
+        tamb_arr = df["temp_air"].fillna(TAMB_DEFAULT).values
+    else:
+        tamb_arr = np.full(len(index), TAMB_DEFAULT)
+
+    # Temperatura de celda (modelo NOCT) y factor de eficiencia por temp.
+    tcell = tamb_arr + (noct - 20.0) * (poa / 800.0)
+    df["tcell"] = tcell
+    factor_temp = 1.0 + gamma_pmax * (tcell - 25.0)
+
+    # Cascada de energía (kWh por bloque).
+    a_kwh = area * efficiency * _BLOQUE_H / 1000.0
+    e_nominal = poa * a_kwh
+    e_temp = e_nominal * factor_temp
+    e_soil = e_temp * (1.0 - soiling)
+    # IAM requiere AOI que no está en el DataFrame TMY; se omite (cero pérdida).
+    e_iam = e_soil
+    e_wire = e_iam * (1.0 - wiring_loss)
+    e_inv = e_wire * eta_inv
+    factor_degr = (1.0 - degradation) ** max(0, int(year_index))
+    e_net = e_inv * factor_degr
+
+    df["energia_generada_kWh"] = e_net
+    df["potencia_generada"] = e_net / _BLOQUE_H * 1000.0
+
+    s = lambda arr: float(np.nansum(arr))
+    perdidas = {
+        "nominal": s(e_nominal),
+        "temperatura": s(e_nominal) - s(e_temp),
+        "suciedad": s(e_temp) - s(e_soil),
+        "iam": 0.0,  # no computable sin AOI en TMY
+        "cableado": s(e_iam) - s(e_wire),
+        "inversor": s(e_wire) - s(e_inv),
+        "degradacion": s(e_inv) - s(e_net),
+        "neto": s(e_net),
+    }
+    return df, perdidas

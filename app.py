@@ -21,7 +21,7 @@ from plotly.subplots import make_subplots
 from timezonefinder import TimezoneFinder
 
 from motor_2 import calculate
-from motor_fisica_avanzada import calculate_advanced
+from motor_fisica_avanzada import calculate_advanced, apply_advanced_losses
 from motor_financiero import (HORIZONTE_ANIOS, TASA_DESCUENTO_DEFAULT,
                               TASA_INFLACION_DEFAULT, factor_vp_ahorros,
                               simular_financiero)
@@ -106,26 +106,27 @@ MESES_ES_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
                   "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
 
 # Defaults financieros (editables en la página de análisis)
-COSTO_PANEL_M2_DEFAULT = 1000     # MXN / m²
+COSTO_PANEL_M2_DEFAULT = 1100     # MXN / m²
 COSTO_PILA_DEFAULT = 500000       # MXN / pila (100 kWh)
-NUM_APAGONES_DEFAULT = 10
-DUR_APAGON_DEFAULT = 1.5          # horas
-CAP_RESPALDO_DEFAULT = 100        # kWh
+NUM_APAGONES_DEFAULT = 0
+DUR_APAGON_DEFAULT = 1         # horas
+CAP_RESPALDO_DEFAULT = 0        # kWh
 
 # Cotización realista (capa opcional dentro del análisis)
 COSTO_KWH_BESS_DEFAULT = 12000    # MXN/kWh instalado (LiFePO4 llave en mano)
 BOS_PCT_DEFAULT = 30              # % BOS sobre equipo (inversores, montaje, instalación, trámites)
-COSTO_TOTAL_DEFAULT = 2000000    # MXN — costo total del proyecto (cotización directa)
+COSTO_TOTAL_DEFAULT = 200000    # MXN — costo total del proyecto (cotización directa)
 COT_APAGONES_DEFAULT = 12         # apagones/año (para pérdidas evitadas)
 COT_HORAS_DEFAULT = 2             # h por apagón
 COT_COSTO_HORA_DEFAULT = 5000     # MXN/hora de inactividad
 
 # Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
-PRECIO_BASE_DEFAULT = 1.10        # MXN/kWh
-PRECIO_INT_DEFAULT = 1.50         # MXN/kWh
-PRECIO_PUNTA_DEFAULT = 3.20       # MXN/kWh
-CARGO_CAP_DEFAULT = 350           # MXN/kW (capacidad/punta)
-CARGO_DIST_DEFAULT = 100          # MXN/kW (distribución)
+# (energía integrada y cargos por demanda de referencia CFE 2026, Golfo Norte).
+PRECIO_BASE_DEFAULT = 0.8969      # MXN/kWh
+PRECIO_INT_DEFAULT = 1.3806       # MXN/kWh
+PRECIO_PUNTA_DEFAULT = 1.4964     # MXN/kWh
+CARGO_CAP_DEFAULT = 358.41        # MXN/kW (capacidad/punta)
+CARGO_DIST_DEFAULT = 90.01        # MXN/kW (distribución)
 INFLACION_DEFAULT = 4.26          # %/año (crecimiento del ahorro)
 DESCUENTO_DEFAULT = 4.11          # %/año (tasa de descuento)
 
@@ -1640,10 +1641,13 @@ finance_page = html.Main(className="main", children=[
                          children="tarifa CFE GDMTH personalizada"),
                 html.Div(className="info-box info-box--sm", children=[
                     "Ajusta los precios por horario de la tarifa GDMTH y los "
-                    "supuestos financieros. El VPN se calcula como una anualidad "
-                    "creciente: el ahorro sube con la inflación y se descuenta a "
-                    "la tasa indicada a lo largo de los años de proyección que "
-                    "definas (por defecto 10).",
+                    "supuestos financieros. Estos precios y cargos por demanda "
+                    "(kW) solo aplican a las tarifas horarias (HM/GDMTH); las "
+                    "domésticas se cobran por bloques y la GDMTO con energía "
+                    "plana. El VPN se calcula como una anualidad creciente: el "
+                    "ahorro sube con la inflación y se descuenta a la tasa "
+                    "indicada a lo largo de los años de proyección que definas "
+                    "(por defecto 10).",
                 ]),
                 html.Div(className="fin-inputs", children=[
                     html.Div(className="field", children=[
@@ -1718,9 +1722,10 @@ finance_page = html.Main(className="main", children=[
                             "value": "on"}],
                         value=[],
                     ),
-                    html.P("Suma el costo real del sistema y el valor de las "
-                           "interrupciones evitadas, para un ROI por pérdidas "
-                           "evitadas (no solo ahorro CFE).",
+                    html.P("Reemplaza la estimación de catálogo: usa el costo "
+                           "real del sistema (llave en mano) más el valor de las "
+                           "interrupciones evitadas. Al activarla, las tarjetas "
+                           "ROI · Payback · VPN · Ahorro reflejan esta cotización.",
                            className="tarifa-desc"),
                 ]),
                 html.Div(id="wrap-cotizacion", style={"display": "none"}, children=[
@@ -2441,7 +2446,7 @@ clientside_callback(
         if (src === 'tmy') {
             return 'Datos meteorológicos reales con nubosidad (PVGIS). ' +
                    'Requiere internet; si falla, usa cielo claro. ' +
-                   'La cascada de pérdidas avanzada no aplica con TMY.';
+                   'En Modo Avanzado usa temperatura ambiente real del TMY para la cascada de pérdidas.';
         }
         return 'Modelo de cielo despejado (optimista, determinista).';
     }
@@ -2782,7 +2787,18 @@ def run_calculation(_, lat, lon, tz, tilt, azimuth, alt, n_panels, area, eff, pr
                 df = calculate_tmy(lat, lon, float(alt), tz_motor,
                                    float(tilt), float(azimuth),
                                    total_area, float(eff), float(pr))
-                # TMY trae dni/dhi/elevación reales; sin cascada de pérdidas.
+                if modo == "avanzado":
+                    df, perdidas = apply_advanced_losses(
+                        df, total_area, float(eff),
+                        gamma_pmax=(float(gamma) / 100.0) if gamma is not None else -0.0040,
+                        noct=float(noct) if noct is not None else 45.0,
+                        soiling=(float(soiling) / 100.0) if soiling is not None else 0.03,
+                        wiring_loss=(float(wiring) / 100.0) if wiring is not None else 0.02,
+                        eta_inv=(float(eta_inv) / 100.0) if eta_inv is not None else 0.97,
+                        degradation=(float(degr) / 100.0) if degr is not None else 0.005,
+                        year_index=int(year_idx) if year_idx else 0,
+                        use_iam=bool(iam),
+                    )
                 store_cols = ["ghi", "poa_global", "potencia_generada",
                               "dni", "dhi", "solar_elevation"]
             except TMYUnavailable:
@@ -3220,6 +3236,8 @@ def parse_demand(contents, filename):
     State("inp-cot-apagones", "value"),
     State("inp-cot-horas", "value"),
     State("inp-cot-costo-hora", "value"),
+    State("dd-tarifa", "value"),
+    State("dd-subtarifa", "value"),
     prevent_initial_call=True,
 )
 def run_financial(_, store_df, store_meta, store_demand,
@@ -3228,7 +3246,7 @@ def run_financial(_, store_df, store_meta, store_demand,
                   ui_mode, precio_base, precio_int, precio_punta,
                   cargo_cap, cargo_dist, inflacion, descuento, horizonte_val,
                   chk_cotizacion, cot_modo, costo_kwh_bess, bos_pct, costo_total,
-                  cot_apagones, cot_horas, cot_costo_hora):
+                  cot_apagones, cot_horas, cot_costo_hora, familia, subtarifa):
     blank = empty_fig()
     dash_vals = ["—"] * 5
     foots = [""] * 5
@@ -3300,6 +3318,11 @@ def run_financial(_, store_df, store_meta, store_demand,
         else:
             kw = {}
 
+        # Tarifa CFE elegida (familia + subtarifa doméstica): define cómo se
+        # factura el recibo — bloques sin horarios para doméstica, plana para
+        # GDMTO, horaria con demanda para HM/GDMTH.
+        tarifa_id = tarifas_cfe.tarifa_efectiva(familia, subtarifa)
+
         res = simular_financiero(
             df_solar=df_solar, df_demanda=df_dem,
             num_paneles=num_paneles, area=area,
@@ -3309,6 +3332,7 @@ def run_financial(_, store_df, store_meta, store_demand,
             num_apagones=n_apagones,
             duracion_horas_apagon=dur_ap,
             horizonte=horizonte,
+            tarifa_id=tarifa_id,
             **kw,
         )
 
@@ -3361,9 +3385,12 @@ def run_financial(_, store_df, store_meta, store_demand,
                 _summ_row("Ciclos equiv./año", f"{vida['ciclos_por_anio']:.0f}"),
                 _summ_row("Vida útil estimada", _vida_str(vida)),
                 _summ_row("Reemplazos (horizonte)", f"{vida['reemplazos']}"),
-                _summ_row("Costo paneles", f"${res['costo_total_paneles']:,.0f}"),
-                _summ_row("Costo pilas", f"${res['costo_total_pilas']:,.0f}"),
-                _summ_row("CapEx total", f"${res['capex']:,.0f}", strong=True),
+                _summ_row("Costo paneles (catálogo)",
+                          f"${res['costo_total_paneles']:,.0f}"),
+                _summ_row("Costo pilas (catálogo)",
+                          f"${res['costo_total_pilas']:,.0f}"),
+                _summ_row("CapEx estimado (catálogo)",
+                          f"${res['capex']:,.0f}", strong=True),
             ]
         # ── Capa opcional: cotización realista (solo Modo Avanzado) ──
         cot_on = (adv and isinstance(chk_cotizacion, (list, tuple))
@@ -3429,10 +3456,15 @@ def run_financial(_, store_df, store_meta, store_demand,
             foot_ahorro = (f"CFE ${res['ahorro_anual']:,.0f} + interrup. "
                            f"${beneficio_int:,.0f}")
             summary_rows.append(
-                _summ_row("CapEx considerado", f"${capex_real:,.0f}"))
+                _summ_row("CapEx realista (llave en mano)",
+                          f"${capex_real:,.0f}"))
             summary_rows.append(
                 _summ_row("ROI con pérdidas evitadas", f"{roi_real:.0f} %",
                           strong=True))
+            summary_rows.append(html.P(
+                "Las tarjetas de arriba (ROI · Payback · VPN · Ahorro) usan "
+                "esta cotización realista, no la estimación de catálogo.",
+                className="tarifa-desc"))
 
         summary = html.Div(className="fin-summary-grid", children=summary_rows)
 
@@ -3618,7 +3650,8 @@ def build_project_report(num_paneles, area, df_dem, res, cot, vida=None):
             _summ_row("Reemplazos en el horizonte", f"{vida['reemplazos']}"),
         ]))
 
-    secciones.append(_report_section("Financiero · ahorro CFE", [
+    secciones.append(_report_section(
+        "Financiero · estimación rápida (catálogo, solo ahorro CFE)", [
         _summ_row("Ahorro anual CFE", f"${res['ahorro_anual']:,.0f}"),
         _summ_row("ROI (horizonte)", f"{res['roi_pct']:.0f} %"),
         _summ_row("Payback", payback_s),
