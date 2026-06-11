@@ -92,7 +92,8 @@ for (año,mes),grupo in df.groupby([df.index.year, df.index.month]):
     else:
         bonificacion = (1/4) * (1- 0.9/fp)
         total = subtotal * (1-bonificacion)
-        
+    
+    print(fp)
     total_iva = total * 1.16
     
     datos = {
