@@ -1,3 +1,13 @@
+---
+title: Kardashev-I Simulador Solar
+emoji: ☀️
+colorFrom: yellow
+colorTo: orange
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Kardashev-I — Simulador Solar Fotovoltaico
 
 Simulador de generación solar FV basado en datos geoespaciales reales, geometría solar e irradiancia POA (modelo Jensen + clear-sky Ineichen).

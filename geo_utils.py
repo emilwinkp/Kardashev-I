@@ -7,10 +7,14 @@ conserva el valor previo del campo de altitud.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import requests
 
 _OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
-_TIMEOUT_S = 6
+# Timeout corto: la API pública es lenta/intermitente y no debe trabar la UI.
+# El campo de altitud es editable a mano y solo afecta la física avanzada.
+_TIMEOUT_S = 2.5
 
 
 def fetch_altitude(lat, lon, timeout=_TIMEOUT_S):
@@ -18,10 +22,17 @@ def fetch_altitude(lat, lon, timeout=_TIMEOUT_S):
 
     Nunca lanza excepción: cualquier error de red o de parseo se traduce en
     ``None`` para que la UI degrade con gracia (el campo de altitud queda
-    editable manualmente).
+    editable manualmente). El resultado se cachea por coordenada redondeada
+    para no repetir la llamada de red al volver a un punto cercano.
     """
     if lat is None or lon is None:
         return None
+    return _fetch_altitude_cached(round(float(lat), 3), round(float(lon), 3),
+                                  timeout)
+
+
+@lru_cache(maxsize=512)
+def _fetch_altitude_cached(lat, lon, timeout):
     try:
         resp = requests.get(
             _OPEN_ELEVATION_URL,

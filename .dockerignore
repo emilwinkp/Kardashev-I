@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+*.md
+!README.md
+*.pdf
+*.jpeg
+*.jpg
+*.png
+!assets/**

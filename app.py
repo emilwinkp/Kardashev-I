@@ -118,7 +118,7 @@ BOS_PCT_DEFAULT = 30              # % BOS sobre equipo (inversores, montaje, ins
 COSTO_TOTAL_DEFAULT = 1000000   # MXN — costo total del proyecto (preset demo)
 # Pérdidas evitadas por interrupciones: reutilizan el nº de apagones y la
 # duración del Modo Avanzado; solo se captura el costo por hora de inactividad.
-COT_COSTO_HORA_DEFAULT = 6000     # MXN/hora de inactividad (preset demo)
+COT_COSTO_HORA_DEFAULT = 5000     # MXN/hora de inactividad (preset demo)
 
 # Tarifa GDMTH manual (Modo Avanzado, finanzas) — defaults = constantes del motor
 # (energía integrada y cargos por demanda de referencia CFE 2026, Golfo Norte).
@@ -129,6 +129,7 @@ CARGO_CAP_DEFAULT = 358.41        # MXN/kW (capacidad/punta)
 CARGO_DIST_DEFAULT = 90.01        # MXN/kW (distribución)
 INFLACION_DEFAULT = 4.26          # %/año (crecimiento del ahorro)
 DESCUENTO_DEFAULT = 4.11          # %/año (tasa de descuento)
+HORIZONTE_PROY_DEFAULT = 10       # años de proyección (vida útil típica FV)
 
 SUCCESS = "#22c55e"
 
@@ -1713,7 +1714,7 @@ finance_page = html.Main(className="main", children=[
                         html.Label(["Años de proyección ",
                                     html.Span("años", className="hint")]),
                         dcc.Input(id="inp-horizonte", type="number",
-                                  value=HORIZONTE_ANIOS, step=1, min=1, max=40,
+                                  value=HORIZONTE_PROY_DEFAULT, step=1, min=1, max=40,
                                   className="input", debounce=True),
                     ]),
                 ]),
@@ -2534,24 +2535,38 @@ def bateria_info(bid):
 @callback(
     Output("inp-lat", "value"),
     Output("inp-lon", "value"),
-    Output("inp-alt", "value"),
     Input("map", "clickData"),
     prevent_initial_call=True,
 )
 def map_click(click):
-    """Clic en el mapa → fija lat/lon y consulta la altitud (Open-Elevation).
+    """Clic en el mapa → fija lat/lon **al instante**.
 
-    Si la API de elevación falla, conserva el valor previo del campo de altitud.
+    La altitud se consulta en una callback aparte (:func:`update_altitude`)
+    para no bloquear el movimiento del pin con la red: Open-Elevation es lenta
+    e intermitente y antes trababa cada clic hasta agotar su timeout.
     """
     if not click:
-        return no_update, no_update, no_update
+        return no_update, no_update
     latlng = click.get("latlng") or {}
     lat, lon = latlng.get("lat"), latlng.get("lng")
     if lat is None or lon is None:
-        return no_update, no_update, no_update
-    lat, lon = round(float(lat), 4), round(float(lon), 4)
+        return no_update, no_update
+    return round(float(lat), 4), round(float(lon), 4)
+
+
+@callback(
+    Output("inp-alt", "value"),
+    Input("inp-lat", "value"),
+    Input("inp-lon", "value"),
+    prevent_initial_call=True,
+)
+def update_altitude(lat, lon):
+    """Consulta la altitud (Open-Elevation) al cambiar la ubicación, sin trabar
+    el pin. Si la API falla, conserva el valor previo (editable a mano)."""
+    if lat is None or lon is None:
+        return no_update
     alt = fetch_altitude(lat, lon)
-    return lat, lon, (alt if alt is not None else no_update)
+    return alt if alt is not None else no_update
 
 
 @callback(
